@@ -1357,9 +1357,17 @@ export default function FileManagerDialog({
           )
         );
 
-        // Update component draft if it exists
-        if (componentsStore.componentDrafts[entity.componentId]) {
-          componentsStore.updateComponentDraft(entity.componentId, entity.newLayers);
+        // Update the primary variant draft if a draft exists. Cleanup
+        // currently runs against the legacy `layers` field, which mirrors
+        // variants[0] — so we replace that variant's working copy.
+        const variantDrafts = componentsStore.componentDrafts[entity.componentId];
+        if (variantDrafts) {
+          const primaryVariantId = component.variants && component.variants.length > 0
+            ? component.variants[0].id
+            : Object.keys(variantDrafts)[0];
+          if (primaryVariantId) {
+            componentsStore.updateComponentDraft(entity.componentId, primaryVariantId, entity.newLayers);
+          }
         }
       }
 

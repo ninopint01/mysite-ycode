@@ -6,7 +6,7 @@
  */
 
 import { getSupabaseAdmin } from '@/lib/supabase-server';
-import type { LayerStyle, Layer } from '@/types';
+import type { LayerStyle, Layer, ComponentVariant } from '@/types';
 import {
   generateLayerStyleContentHash,
   generatePageLayersHash,
@@ -34,6 +34,8 @@ export interface LayerStyleAffectedEntity {
   pageId?: string; // For pages, this is the page.id (not page_layers.id)
   previousLayers: Layer[];
   newLayers: Layer[];
+  previousVariants?: ComponentVariant[];
+  newVariants?: ComponentVariant[];
 }
 
 /**
@@ -573,10 +575,10 @@ export async function findEntitiesUsingLayerStyle(styleId: string): Promise<Laye
     }
   }
 
-  // Find affected components
+  // Find affected components — search all variant layer trees
   const { data: componentRecords, error: compError } = await client
     .from('components')
-    .select('id, name, layers')
+    .select('id, name, layers, variants')
     .eq('is_published', false)
     .is('deleted_at', null);
 
@@ -585,14 +587,29 @@ export async function findEntitiesUsingLayerStyle(styleId: string): Promise<Laye
   }
 
   for (const record of componentRecords || []) {
-    if (layersContainStyle(record.layers || [], styleId)) {
-      const newLayers = detachStyleFromLayersRecursive(record.layers || [], styleId);
+    const variants = record.variants as ComponentVariant[] | undefined;
+    const primaryLayers = record.layers || [];
+
+    const hasStyleInPrimary = layersContainStyle(primaryLayers, styleId);
+    const hasStyleInVariants = Array.isArray(variants) && variants.some(v => layersContainStyle(v.layers ?? [], styleId));
+
+    if (hasStyleInPrimary || hasStyleInVariants) {
+      const newLayers = detachStyleFromLayersRecursive(primaryLayers, styleId);
+      let newVariants: ComponentVariant[] | undefined;
+      if (Array.isArray(variants) && variants.length > 0) {
+        newVariants = variants.map((v, i) => ({
+          ...v,
+          layers: i === 0 ? newLayers : detachStyleFromLayersRecursive(v.layers ?? [], styleId),
+        }));
+      }
       affectedEntities.push({
         type: 'component',
         id: record.id,
         name: record.name,
-        previousLayers: record.layers || [],
+        previousLayers: primaryLayers,
         newLayers,
+        previousVariants: variants || undefined,
+        newVariants,
       });
     }
   }
@@ -656,10 +673,19 @@ export async function softDeleteStyle(id: string): Promise<LayerStyleSoftDeleteR
         console.error(`Failed to update page_layers ${entity.id}:`, updateError);
       }
     } else if (entity.type === 'component') {
+      const contentHash = generateComponentContentHash({
+        name: entity.name,
+        layers: entity.newLayers,
+        variables: undefined,
+        variants: entity.newVariants,
+      });
+
       const { error: updateError } = await client
         .from('components')
         .update({
           layers: entity.newLayers,
+          ...(entity.newVariants ? { variants: entity.newVariants } : {}),
+          content_hash: contentHash,
           updated_at: new Date().toISOString(),
         })
         .eq('id', entity.id)
@@ -828,7 +854,7 @@ export async function syncLayerStyleChangesToDrafts(
   // --- Sync draft components ---
   const { data: componentRecords } = await client
     .from('components')
-    .select('id, name, layers, variables, content_hash')
+    .select('id, name, layers, variants, variables, content_hash')
     .eq('is_published', false)
     .is('deleted_at', null);
 
@@ -844,10 +870,25 @@ export async function syncLayerStyleChangesToDrafts(
       layers = updateLayersWithStyle(layers, style.id, style.classes, style.design);
     }
 
+    // Apply style updates to all variant layer trees so non-primary
+    // variants stay in sync with style changes.
+    let variants: ComponentVariant[] | undefined = record.variants as ComponentVariant[] | undefined;
+    if (Array.isArray(variants) && variants.length > 0) {
+      variants = variants.map((v, i) => {
+        if (i === 0) return { ...v, layers };
+        let variantLayers = v.layers as Layer[] ?? [];
+        for (const style of styles) {
+          variantLayers = updateLayersWithStyle(variantLayers, style.id, style.classes, style.design);
+        }
+        return { ...v, layers: variantLayers };
+      });
+    }
+
     const newHash = generateComponentContentHash({
       name: record.name,
       layers,
       variables: record.variables,
+      variants,
     });
 
     if (newHash !== record.content_hash) {
@@ -856,7 +897,12 @@ export async function syncLayerStyleChangesToDrafts(
       // across draft/published. Always scope the update to the draft row.
       await client
         .from('components')
-        .update({ layers, content_hash: newHash, updated_at: now })
+        .update({
+          layers,
+          ...(variants ? { variants } : {}),
+          content_hash: newHash,
+          updated_at: now,
+        })
         .eq('id', record.id)
         .eq('is_published', false);
     }

@@ -11,11 +11,41 @@ import {
   replaceLayerWithComponentInstance,
   findLayerById,
   cleanLayersForComponentCreation,
+  regenerateIdsWithInteractionRemapping,
 } from '@/lib/layer-utils';
 import { detachStyleFromLayers, updateLayersWithStyle } from '@/lib/layer-style-utils';
 import { scheduleIdle } from '@/lib/schedule-idle';
 import { generateId } from '@/lib/utils';
-import type { Component, Layer } from '@/types';
+import type { Component, ComponentVariant, Layer } from '@/types';
+
+/**
+ * Per-component, per-variant working copy of layers used while editing a
+ * component. Outer key = componentId, inner key = variantId.
+ */
+type ComponentDraftMap = Record<string, Record<string, Layer[]>>;
+
+/**
+ * Build a fresh `variants` array from the latest draft layers, falling back to
+ * each variant's persisted layers when no draft exists for it (e.g. the user
+ * never switched to that variant during this edit session).
+ */
+function buildVariantsFromDrafts(
+  component: Component,
+  drafts: Record<string, Layer[]> | undefined,
+): ComponentVariant[] {
+  const variants = component.variants && component.variants.length > 0
+    ? component.variants
+    : [{ id: generateId('cmpvar'), name: 'Default', layers: component.layers ?? [] }];
+  return variants.map(v => ({ ...v, layers: drafts?.[v.id] ?? v.layers }));
+}
+
+/** Pick the first variant id of a component, used as the safe default. */
+function getPrimaryVariantId(component: Component | undefined): string | null {
+  if (!component) return null;
+  const variants = component.variants;
+  if (variants && variants.length > 0) return variants[0].id;
+  return null;
+}
 
 /** Remove variableLinks entries that point TO a given variable ID (as parent target). */
 function removeVariableLinksPointingTo(layer: Layer, targetVariableId: string): Layer {
@@ -73,11 +103,17 @@ interface ComponentsState {
   components: Component[];
   isLoading: boolean;
   error: string | null;
-  componentDrafts: Record<string, Layer[]>;
   /**
-   * True when a draft has been mutated since it was last loaded or persisted.
-   * Used to skip no-op saves and cross-page sync passes when leaving the
-   * component editor without making any changes.
+   * Per-component, per-variant working copy of layers used while editing a
+   * component. Outer key = componentId, inner key = variantId.
+   */
+  componentDrafts: ComponentDraftMap;
+  /**
+   * True when any variant draft for this component has been mutated since it
+   * was last loaded or persisted. Used to skip no-op saves and cross-page
+   * sync passes when leaving the component editor without making any changes.
+   * Tracked at component granularity (not per-variant) because saves always
+   * persist the whole `variants` array as one unit.
    */
   componentDraftDirty: Record<string, boolean>;
   isSaving: boolean;
@@ -125,9 +161,24 @@ interface ComponentsActions {
 
   // Draft management (for editing mode)
   loadComponentDraft: (componentId: string) => Promise<void>;
-  updateComponentDraft: (componentId: string, layers: Layer[]) => void;
+  updateComponentDraft: (componentId: string, variantId: string, layers: Layer[]) => void;
   saveComponentDraft: (componentId: string) => Promise<void>;
   clearComponentDraft: (componentId: string) => void;
+  /**
+   * Read the current draft layers for a component+variant, falling back to
+   * the persisted variant layers (or the legacy `layers` field) when no
+   * working copy exists yet for that variant.
+   */
+  getComponentDraftLayers: (componentId: string, variantId?: string | null) => Layer[];
+
+  // Variant management
+  addVariant: (componentId: string, fromVariantId?: string | null) => Promise<string | null>;
+  renameVariant: (componentId: string, variantId: string, name: string) => Promise<void>;
+  duplicateVariant: (componentId: string, variantId: string) => Promise<string | null>;
+  deleteVariant: (componentId: string, variantId: string) => Promise<void>;
+  /** Persist a new ordering of a component's variants. Order matters because
+   *  the first variant is the implicit "default" instances fall back to. */
+  reorderVariants: (componentId: string, orderedVariantIds: string[]) => Promise<void>;
 
   // Convenience actions
   renameComponent: (id: string, newName: string) => Promise<void>;
@@ -143,6 +194,10 @@ interface ComponentsActions {
   addAudioVariable: (componentId: string, name: string) => Promise<string | null>;
   addVideoVariable: (componentId: string, name: string) => Promise<string | null>;
   addIconVariable: (componentId: string, name: string) => Promise<string | null>;
+  /** Add a `'variant'` typed variable. Variant variables expose a parent
+   *  variable that drives the `componentVariantId` of any nested-instance layer
+   *  whose `componentVariantVariableId` points at it. */
+  addVariantVariable: (componentId: string, name: string) => Promise<string | null>;
   updateTextVariable: (componentId: string, variableId: string, updates: { name?: string; placeholder?: string; default_value?: any }) => Promise<void>;
   reorderVariables: (componentId: string, orderedIds: string[]) => Promise<void>;
   deleteTextVariable: (componentId: string, variableId: string) => Promise<void>;
@@ -160,17 +215,30 @@ interface ComponentsActions {
 type ComponentsStore = ComponentsState & ComponentsActions;
 
 export const useComponentsStore = create<ComponentsStore>((set, get) => {
+  /**
+   * Apply a layer transform to every variant on every component (and to every
+   * working draft). Used by global style sync helpers below.
+   */
   const updateComponentLayers = (updateLayers: (layers: Layer[]) => Layer[]) => {
     const { components, componentDrafts } = get();
 
-    const updatedComponents = components.map(component => ({
-      ...component,
-      layers: updateLayers(component.layers),
-    }));
+    const updatedComponents = components.map(component => {
+      const transformedVariants = (component.variants && component.variants.length > 0)
+        ? component.variants.map(v => ({ ...v, layers: updateLayers(v.layers) }))
+        : undefined;
+      return {
+        ...component,
+        layers: updateLayers(component.layers),
+        ...(transformedVariants ? { variants: transformedVariants } : {}),
+      };
+    });
 
-    const updatedDrafts: Record<string, Layer[]> = {};
-    Object.entries(componentDrafts).forEach(([componentId, layers]) => {
-      updatedDrafts[componentId] = updateLayers(layers);
+    const updatedDrafts: ComponentDraftMap = {};
+    Object.entries(componentDrafts).forEach(([componentId, variantDrafts]) => {
+      updatedDrafts[componentId] = {};
+      Object.entries(variantDrafts).forEach(([variantId, layers]) => {
+        updatedDrafts[componentId][variantId] = updateLayers(layers);
+      });
     });
 
     set({ components: updatedComponents, componentDrafts: updatedDrafts });
@@ -337,10 +405,13 @@ export const useComponentsStore = create<ComponentsStore>((set, get) => {
                 ),
               }));
 
-              // Also update component draft if it's currently being edited
+              // Also update component draft if it's currently being edited.
+              // The legacy `layers` field mirrors the primary variant, so the
+              // detached layers replace that variant's draft.
               const currentDraft = get().componentDrafts[entity.id];
-              if (currentDraft) {
-                get().updateComponentDraft(entity.id, entity.newLayers);
+              const primaryVariantId = getPrimaryVariantId(get().getComponentById(entity.id));
+              if (currentDraft && primaryVariantId) {
+                get().updateComponentDraft(entity.id, primaryVariantId, entity.newLayers);
               }
             }
           }
@@ -442,18 +513,29 @@ export const useComponentsStore = create<ComponentsStore>((set, get) => {
       }
     },
 
-    // Load component into draft for editing
+    // Load component into draft for editing — clones every variant so the
+    // user can switch between them in the editor without losing edits.
     loadComponentDraft: async (componentId) => {
       const component = get().components.find((c) => c.id === componentId);
       if (component) {
-        const layers = JSON.parse(JSON.stringify(component.layers)); // Deep clone
+        // Backfill a "Default" variant for components that pre-date the
+        // variants migration so the editor always has at least one entry.
+        const variants = component.variants && component.variants.length > 0
+          ? component.variants
+          : [{ id: generateId('cmpvar'), name: 'Default', layers: component.layers ?? [] }];
+
+        const variantDrafts: Record<string, Layer[]> = {};
+        for (const variant of variants) {
+          variantDrafts[variant.id] = JSON.parse(JSON.stringify(variant.layers ?? []));
+        }
+        // Layers used for version tracking — track the primary variant for now.
+        const primaryLayers = variantDrafts[variants[0].id] ?? [];
 
         // Mark entity as initializing BEFORE updating store to prevent false change detection
         try {
           const { markEntityInitializing, updatePreviousState } = await import('@/hooks/use-undo-redo');
           markEntityInitializing('component', componentId);
-          // Also sync the previous state cache with loaded data
-          updatePreviousState('component', componentId, layers);
+          updatePreviousState('component', componentId, primaryLayers);
         } catch (err) {
           console.error('Failed to mark component as initializing:', err);
         }
@@ -461,7 +543,7 @@ export const useComponentsStore = create<ComponentsStore>((set, get) => {
         set((state) => ({
           componentDrafts: {
             ...state.componentDrafts,
-            [componentId]: layers,
+            [componentId]: variantDrafts,
           },
           componentDraftDirty: {
             ...state.componentDraftDirty,
@@ -471,19 +553,24 @@ export const useComponentsStore = create<ComponentsStore>((set, get) => {
 
         // Initialize version tracking with loaded state
         import('@/lib/version-tracking').then(({ initializeVersionTracking }) => {
-          initializeVersionTracking('component', componentId, layers);
+          initializeVersionTracking('component', componentId, primaryLayers);
         }).catch((err) => {
           console.error('Failed to initialize component version tracking:', err);
         });
       }
     },
 
-    // Update component draft (triggers auto-save)
-    updateComponentDraft: (componentId, layers) => {
+    // Update component variant draft (triggers auto-save). All variant drafts
+    // for the same component share a single debounced save so we always
+    // persist them together as one `variants` payload.
+    updateComponentDraft: (componentId, variantId, layers) => {
       set((state) => ({
         componentDrafts: {
           ...state.componentDrafts,
-          [componentId]: layers,
+          [componentId]: {
+            ...(state.componentDrafts[componentId] || {}),
+            [variantId]: layers,
+          },
         },
         componentDraftDirty: {
           ...state.componentDraftDirty,
@@ -510,24 +597,50 @@ export const useComponentsStore = create<ComponentsStore>((set, get) => {
       }));
     },
 
-    // Save component draft to database
-    saveComponentDraft: async (componentId) => {
-      const { componentDrafts, componentDraftDirty } = get();
-      const draftLayers = componentDrafts[componentId];
+    getComponentDraftLayers: (componentId, variantId) => {
+      const component = get().components.find(c => c.id === componentId);
+      const drafts = get().componentDrafts[componentId];
+      const targetVariantId = variantId ?? getPrimaryVariantId(component);
+      if (drafts && targetVariantId && drafts[targetVariantId]) {
+        return drafts[targetVariantId];
+      }
+      // Fall back to persisted variant layers, then to the legacy `layers`.
+      if (component?.variants && component.variants.length > 0) {
+        const match = targetVariantId
+          ? component.variants.find(v => v.id === targetVariantId)
+          : undefined;
+        return (match ?? component.variants[0]).layers ?? [];
+      }
+      return component?.layers ?? [];
+    },
 
-      if (!draftLayers) {
+    // Save the entire variants payload for a component to the database.
+    saveComponentDraft: async (componentId) => {
+      const { componentDrafts, componentDraftDirty, components } = get();
+      const variantDrafts = componentDrafts[componentId];
+
+      if (!variantDrafts || Object.keys(variantDrafts).length === 0) {
         console.warn(`No draft found for component ${componentId}`);
         return;
       }
 
-      // Skip the round-trip entirely when the draft has not been mutated
-      // since it was loaded or last persisted.
+      // Skip the round-trip entirely when nothing has changed since the draft
+      // was loaded or last persisted.
       if (!componentDraftDirty[componentId]) {
         return;
       }
 
-      // Capture the layers we're about to save
-      const layersBeingSaved = draftLayers;
+      const component = components.find(c => c.id === componentId);
+      if (!component) {
+        console.warn(`Component ${componentId} not found in store while saving draft`);
+        return;
+      }
+
+      // Rebuild the variants payload from the latest drafts. Variants the user
+      // never opened during this session keep their persisted layers.
+      const variantsBeingSaved = buildVariantsFromDrafts(component, variantDrafts);
+      // Snapshot the primary variant's layers for change-detection / undo.
+      const layersBeingSaved = variantsBeingSaved[0]?.layers ?? [];
 
       set({ isSaving: true });
 
@@ -535,7 +648,7 @@ export const useComponentsStore = create<ComponentsStore>((set, get) => {
         const response = await fetch(`/ycode/api/components/${componentId}`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ layers: layersBeingSaved }),
+          body: JSON.stringify({ variants: variantsBeingSaved }),
         });
 
         const result = await response.json();
@@ -548,56 +661,53 @@ export const useComponentsStore = create<ComponentsStore>((set, get) => {
 
         const updatedComponent = result.data;
 
-        // Update the component in the store
-        // Check if layers changed during save (e.g., undo/redo happened)
-        const currentDraft = get().componentDrafts[componentId];
-        const currentLayersJSON = JSON.stringify(currentDraft || []);
-        const savedLayersJSON = JSON.stringify(layersBeingSaved);
+        // Detect whether any variant changed during the save (e.g. undo/redo).
+        const currentDrafts = get().componentDrafts[componentId];
+        const currentVariantsJSON = JSON.stringify(buildVariantsFromDrafts(updatedComponent, currentDrafts));
+        const savedVariantsJSON = JSON.stringify(variantsBeingSaved);
 
-        if (currentLayersJSON === savedLayersJSON) {
-          // Safe to update - no changes made during save
+        if (currentVariantsJSON === savedVariantsJSON) {
           set((state) => ({
             components: state.components.map((c) => (c.id === componentId ? updatedComponent : c)),
             componentDraftDirty: { ...state.componentDraftDirty, [componentId]: false },
             isSaving: false,
           }));
 
-          // Record version for undo/redo only if layers match what we saved
+          // Record version for undo/redo only if variants match what we saved.
           import('@/lib/version-tracking').then(({ recordVersionViaApi }) => {
             recordVersionViaApi('component', componentId, layersBeingSaved);
           }).catch((err) => {
             console.error('Failed to record component version:', err);
           });
         } else {
-          // Layers changed during save - keep local changes
+          // Variants changed mid-save — keep the local copy and let the next
+          // debounced save record the version.
           set((state) => ({
             components: state.components.map((c) => (c.id === componentId ? updatedComponent : c)),
             isSaving: false,
           }));
-
-          // DO NOT record version - the saved state is stale
-          // The new state will trigger another auto-save which will record its own version
         }
 
-        // Trigger component sync across all pages
-        // This will be handled by usePagesStore.updateComponentOnLayers
+        // Trigger component sync across all pages — pages render the primary
+        // variant for back-compat and per-instance variant resolution happens
+        // at render time.
         if (typeof window !== 'undefined') {
           window.dispatchEvent(new CustomEvent('componentUpdated', {
-            detail: { componentId, layers: draftLayers }
+            detail: { componentId, layers: layersBeingSaved }
           }));
 
-          // Regenerate thumbnail in the background (fire-and-forget)
-          triggerThumbnailGeneration(componentId, draftLayers, get().components);
+          triggerThumbnailGeneration(componentId, layersBeingSaved, get().components);
         }
 
-        // Regenerate CSS to include updated component classes.
-        // Run this off the critical path so navigation/UI is not blocked.
+        // Regenerate CSS to include updated component classes. Collect layers
+        // from every variant so styles unique to a non-default variant are
+        // also captured. Run this off the critical path so navigation/UI is
+        // not blocked.
         scheduleIdle(async () => {
           try {
             const { usePagesStore } = await import('./usePagesStore');
             const { containsComponent } = await import('@/lib/component-utils');
 
-            // Find pages that use this component and regenerate their per-page CSS
             const allDrafts = usePagesStore.getState().draftsByPageId;
             const affectedPageIds: string[] = [];
             Object.entries(allDrafts).forEach(([pid, pageDraft]) => {
@@ -614,9 +724,11 @@ export const useComponentsStore = create<ComponentsStore>((set, get) => {
               }).catch(() => {});
             }
 
-            // Also regenerate global draft_css for builder preview
+            // Also regenerate global draft_css for builder preview.
+            // Start from all variant layers so non-default variant styles are
+            // included, then append affected page layers.
             const { generateAndSaveCSS } = await import('@/lib/client/cssGenerator');
-            const allLayers: Layer[] = [...layersBeingSaved];
+            const allLayers: Layer[] = variantsBeingSaved.flatMap(v => v.layers);
             Object.values(allDrafts).forEach((pageDraft) => {
               if (pageDraft.layers && containsComponent(pageDraft.layers, componentId)) {
                 allLayers.push(...pageDraft.layers);
@@ -667,12 +779,27 @@ export const useComponentsStore = create<ComponentsStore>((set, get) => {
     },
 
     /**
-     * Create a component from a layer in a component draft
+     * Create a component from a layer in a component draft.
+     *
+     * The action targets whichever variant the editor is currently focused on;
+     * extracting a sub-tree from one variant doesn't change the others.
      */
     createComponentFromLayer: async (componentId, layerId, componentName) => {
-      const { componentDrafts } = get();
-      const layers = componentDrafts[componentId];
-      if (!layers) return null;
+      const { componentDrafts, components } = get();
+      const variantDrafts = componentDrafts[componentId];
+      if (!variantDrafts) return null;
+
+      // Find the variant that actually contains the layer being extracted.
+      let activeVariantId: string | null = null;
+      let layers: Layer[] | null = null;
+      for (const [variantId, variantLayers] of Object.entries(variantDrafts)) {
+        if (findLayerById(variantLayers, layerId)) {
+          activeVariantId = variantId;
+          layers = variantLayers;
+          break;
+        }
+      }
+      if (!activeVariantId || !layers) return null;
 
       const layerToCopy = findLayerById(layers, layerId);
       if (!layerToCopy) return null;
@@ -687,12 +814,13 @@ export const useComponentsStore = create<ComponentsStore>((set, get) => {
         components: [newComponent, ...state.components],
       }));
 
-      // Replace layer with component instance
+      // Replace the original layer with the new component instance in the
+      // variant we extracted from.
       const newLayers = replaceLayerWithComponentInstance(layers, layerId, newComponent.id);
-      get().updateComponentDraft(componentId, newLayers);
+      get().updateComponentDraft(componentId, activeVariantId, newLayers);
 
       // Generate thumbnail in the background (fire-and-forget)
-      triggerThumbnailGeneration(newComponent.id, newComponent.layers, get().components);
+      triggerThumbnailGeneration(newComponent.id, newComponent.layers, [...components, newComponent]);
 
       return newComponent.id;
     },
@@ -983,6 +1111,40 @@ export const useComponentsStore = create<ComponentsStore>((set, get) => {
       }
     },
 
+    addVariantVariable: async (componentId, name) => {
+      const component = get().getComponentById(componentId);
+      if (!component) return null;
+
+      const variableId = generateId('cpv');
+      const newVariable = { id: variableId, name, type: 'variant' as const };
+      const updatedVariables = [...(component.variables || []), newVariable];
+
+      try {
+        const response = await fetch(`/ycode/api/components/${componentId}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ variables: updatedVariables }),
+        });
+
+        const result = await response.json();
+        if (result.error) {
+          console.error('Failed to add variant variable:', result.error);
+          return null;
+        }
+
+        set((state) => ({
+          components: state.components.map((c) =>
+            c.id === componentId ? { ...c, variables: updatedVariables } : c
+          ),
+        }));
+
+        return variableId;
+      } catch (error) {
+        console.error('Failed to add variant variable:', error);
+        return null;
+      }
+    },
+
     // Update a text variable's name and/or default value
     updateTextVariable: async (componentId, variableId, updates) => {
       const component = get().getComponentById(componentId);
@@ -1083,6 +1245,14 @@ export const useComponentsStore = create<ComponentsStore>((set, get) => {
             };
           }
 
+          // Drop the variant-variable link if it points at the deleted variable.
+          // The layer's own `componentVariantId` (set when the user picked a
+          // variant manually) is preserved as the local fallback.
+          if (updatedLayer.componentVariantVariableId === variableId) {
+            const { componentVariantVariableId: _, ...rest } = updatedLayer;
+            updatedLayer = rest;
+          }
+
           updatedLayer = removeVariableLinksPointingTo(updatedLayer, variableId);
 
           // Recursively process children
@@ -1094,8 +1264,17 @@ export const useComponentsStore = create<ComponentsStore>((set, get) => {
         });
       };
 
-      // Clean up component's own layers
-      const updatedLayers = component.layers ? unlinkLayersFromVariable(component.layers) : [];
+      // Clean up component's own layers across every variant — variables are
+      // shared across variants so a deleted variable must be unlinked from all
+      // of them. The legacy `layers` field is kept in sync with variants[0].
+      const baselineVariants: ComponentVariant[] = component.variants && component.variants.length > 0
+        ? component.variants
+        : [{ id: generateId('cmpvar'), name: 'Default', layers: component.layers ?? [] }];
+      const updatedVariants = baselineVariants.map(v => ({
+        ...v,
+        layers: unlinkLayersFromVariable(v.layers ?? []),
+      }));
+      const updatedLayers = updatedVariants[0]?.layers ?? [];
 
       try {
         const response = await fetch(`/ycode/api/components/${componentId}`, {
@@ -1103,7 +1282,7 @@ export const useComponentsStore = create<ComponentsStore>((set, get) => {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             variables: updatedVariables,
-            layers: updatedLayers,
+            variants: updatedVariants,
           }),
         });
 
@@ -1113,19 +1292,27 @@ export const useComponentsStore = create<ComponentsStore>((set, get) => {
           return;
         }
 
-        // Update local state
-        set((state) => ({
-          components: state.components.map((c) =>
-            c.id === componentId ? { ...c, variables: updatedVariables, layers: updatedLayers } : c
-          ),
-          // Also update draft if it exists
-          componentDrafts: {
-            ...state.componentDrafts,
-            ...(state.componentDrafts[componentId] ? {
-              [componentId]: unlinkLayersFromVariable(state.componentDrafts[componentId])
-            } : {}),
-          },
-        }));
+        // Update local state — clean every variant draft for this component.
+        set((state) => {
+          const existingDrafts = state.componentDrafts[componentId];
+          let updatedDrafts: Record<string, Layer[]> | undefined;
+          if (existingDrafts) {
+            updatedDrafts = {};
+            for (const [variantId, layers] of Object.entries(existingDrafts)) {
+              updatedDrafts[variantId] = unlinkLayersFromVariable(layers);
+            }
+          }
+          return {
+            components: state.components.map((c) =>
+              c.id === componentId
+                ? { ...c, variables: updatedVariables, layers: updatedLayers, variants: updatedVariants }
+                : c
+            ),
+            componentDrafts: updatedDrafts
+              ? { ...state.componentDrafts, [componentId]: updatedDrafts }
+              : state.componentDrafts,
+          };
+        });
 
         // Clean up orphaned overrides from page instances
         // Import pages store and clean up componentOverrides that reference the deleted variable
@@ -1159,6 +1346,14 @@ export const useComponentsStore = create<ComponentsStore>((set, get) => {
               updatedLayer.componentOverrides = overrides;
             }
 
+            // Mirror of the editor-side strip: drop dangling variant-variable
+            // links so a deleted variant variable doesn't keep pointing into a
+            // nonexistent parent variable.
+            if (updatedLayer.componentVariantVariableId === variableId) {
+              const { componentVariantVariableId: _, ...rest } = updatedLayer;
+              updatedLayer = rest;
+            }
+
             updatedLayer = removeVariableLinksPointingTo(updatedLayer, variableId);
 
             // Recursively process children
@@ -1182,6 +1377,233 @@ export const useComponentsStore = create<ComponentsStore>((set, get) => {
         });
       } catch (error) {
         console.error('Failed to delete text variable:', error);
+      }
+    },
+
+    /**
+     * Add a new variant to a component. Optionally seeds it from the layer
+     * tree of an existing variant (the user's "duplicate current variant"
+     * affordance). The variant is persisted via `PUT /api/components/:id` and
+     * appended to the working draft so the editor can switch to it
+     * immediately. Returns the new variant id.
+     */
+    addVariant: async (componentId, fromVariantId) => {
+      const component = get().getComponentById(componentId);
+      if (!component) return null;
+
+      const baseline: ComponentVariant[] = component.variants && component.variants.length > 0
+        ? component.variants
+        : [{ id: generateId('cmpvar'), name: 'Default', layers: component.layers ?? [] }];
+
+      // Pick the variant to clone (caller-specified, otherwise the first).
+      const fromVariant = (fromVariantId && baseline.find(v => v.id === fromVariantId)) || baseline[0];
+
+      // Generate fresh layer IDs so animations / interactions inside the new
+      // variant target its own layers rather than the source variant's.
+      const clonedLayers: Layer[] = (fromVariant.layers ?? []).map(layer =>
+        regenerateIdsWithInteractionRemapping(JSON.parse(JSON.stringify(layer)))
+      );
+
+      // Pick a unique "Variant N" name based on existing variants.
+      const existingNames = new Set(baseline.map(v => v.name));
+      let suffix = baseline.length + 1;
+      let proposedName = `Variant ${suffix}`;
+      while (existingNames.has(proposedName)) {
+        suffix += 1;
+        proposedName = `Variant ${suffix}`;
+      }
+
+      const newVariant: ComponentVariant = {
+        id: generateId('cmpvar'),
+        name: proposedName,
+        layers: clonedLayers,
+      };
+
+      const updatedVariants = [...baseline, newVariant];
+
+      try {
+        const response = await fetch(`/ycode/api/components/${componentId}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ variants: updatedVariants }),
+        });
+        const result = await response.json();
+        if (result.error) {
+          console.error('Failed to add variant:', result.error);
+          return null;
+        }
+
+        const updatedComponent: Component = result.data;
+
+        // Seed the working draft for the new variant so the editor can switch
+        // to it without a reload, and refresh the canonical store entry.
+        set((state) => ({
+          components: state.components.map(c => (c.id === componentId ? updatedComponent : c)),
+          componentDrafts: {
+            ...state.componentDrafts,
+            [componentId]: {
+              ...(state.componentDrafts[componentId] || {}),
+              [newVariant.id]: JSON.parse(JSON.stringify(clonedLayers)),
+            },
+          },
+          componentDraftDirty: {
+            ...state.componentDraftDirty,
+            [componentId]: false,
+          },
+        }));
+
+        return newVariant.id;
+      } catch (error) {
+        console.error('Failed to add variant:', error);
+        return null;
+      }
+    },
+
+    renameVariant: async (componentId, variantId, name) => {
+      const component = get().getComponentById(componentId);
+      if (!component?.variants) return;
+      const trimmed = name.trim();
+      if (!trimmed) return;
+
+      const updatedVariants = component.variants.map(v =>
+        v.id === variantId ? { ...v, name: trimmed } : v
+      );
+
+      // Optimistic update so the rename feels instant in the sidebar.
+      set((state) => ({
+        components: state.components.map(c => (c.id === componentId ? { ...c, variants: updatedVariants } : c)),
+      }));
+
+      try {
+        const response = await fetch(`/ycode/api/components/${componentId}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ variants: updatedVariants }),
+        });
+        const result = await response.json();
+        if (result.error) {
+          console.error('Failed to rename variant:', result.error);
+          // Roll back on failure.
+          set((state) => ({
+            components: state.components.map(c => (c.id === componentId ? component : c)),
+          }));
+        } else {
+          set((state) => ({
+            components: state.components.map(c => (c.id === componentId ? result.data : c)),
+          }));
+        }
+      } catch (error) {
+        console.error('Failed to rename variant:', error);
+        set((state) => ({
+          components: state.components.map(c => (c.id === componentId ? component : c)),
+        }));
+      }
+    },
+
+    duplicateVariant: async (componentId, variantId) => {
+      return get().addVariant(componentId, variantId);
+    },
+
+    /**
+     * Delete a variant. Refuses to delete the last remaining variant.
+     *
+     * Existing instances that referenced the deleted variant fall back to the
+     * first variant automatically via `getComponentVariantLayers` — no extra
+     * page-level rewriting needed.
+     */
+    deleteVariant: async (componentId, variantId) => {
+      const component = get().getComponentById(componentId);
+      if (!component?.variants || component.variants.length <= 1) return;
+
+      const updatedVariants = component.variants.filter(v => v.id !== variantId);
+      if (updatedVariants.length === component.variants.length) return; // not found
+
+      try {
+        const response = await fetch(`/ycode/api/components/${componentId}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ variants: updatedVariants }),
+        });
+        const result = await response.json();
+        if (result.error) {
+          console.error('Failed to delete variant:', result.error);
+          return;
+        }
+
+        const updatedComponent: Component = result.data;
+
+        set((state) => {
+          // Drop the variant draft from the working copy too.
+          const existingDrafts = state.componentDrafts[componentId];
+          let nextDrafts = state.componentDrafts;
+          if (existingDrafts && existingDrafts[variantId]) {
+            const { [variantId]: _, ...rest } = existingDrafts;
+            nextDrafts = { ...state.componentDrafts, [componentId]: rest };
+          }
+          return {
+            components: state.components.map(c => (c.id === componentId ? updatedComponent : c)),
+            componentDrafts: nextDrafts,
+          };
+        });
+      } catch (error) {
+        console.error('Failed to delete variant:', error);
+      }
+    },
+
+    /**
+     * Reorder variants in-place. Persists via the standard component PUT and
+     * mirrors the new order optimistically so the sidebar repaints instantly.
+     * Falls back to the previous order if the server rejects the update.
+     */
+    reorderVariants: async (componentId, orderedVariantIds) => {
+      const component = get().getComponentById(componentId);
+      if (!component?.variants?.length) return;
+
+      const byId = new Map(component.variants.map(v => [v.id, v]));
+      const next = orderedVariantIds
+        .map(id => byId.get(id))
+        .filter((v): v is ComponentVariant => Boolean(v));
+      // Append any variants the caller didn't specify so we never lose data
+      // if the UI somehow sends a partial order.
+      for (const v of component.variants) {
+        if (!orderedVariantIds.includes(v.id)) next.push(v);
+      }
+
+      // Bail if nothing actually changed.
+      const same = next.length === component.variants.length
+        && next.every((v, i) => v.id === component.variants![i].id);
+      if (same) return;
+
+      const previousVariants = component.variants;
+      // Optimistic reorder.
+      set((state) => ({
+        components: state.components.map(c => (c.id === componentId ? { ...c, variants: next } : c)),
+      }));
+
+      try {
+        const response = await fetch(`/ycode/api/components/${componentId}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ variants: next }),
+        });
+        const result = await response.json();
+        if (result.error) {
+          console.error('Failed to reorder variants:', result.error);
+          // Roll back on failure.
+          set((state) => ({
+            components: state.components.map(c => (c.id === componentId ? { ...c, variants: previousVariants } : c)),
+          }));
+          return;
+        }
+
+        set((state) => ({
+          components: state.components.map(c => (c.id === componentId ? result.data : c)),
+        }));
+      } catch (error) {
+        console.error('Failed to reorder variants:', error);
+        set((state) => ({
+          components: state.components.map(c => (c.id === componentId ? { ...c, variants: previousVariants } : c)),
+        }));
       }
     },
 

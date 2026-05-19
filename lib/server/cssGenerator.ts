@@ -125,7 +125,15 @@ export async function generateAndSaveDraftCSS(): Promise<string> {
 
   const components: Component[] = await getAllComponents(false);
   for (const component of components) {
-    if (component.layers && Array.isArray(component.layers)) {
+    // Collect classes from every variant — without this, classes that only
+    // appear in non-primary variants (e.g. `bg-[#35b7d4]` on Variant 3) are
+    // missing from the compiled stylesheet and the published instance renders
+    // unstyled even though `resolveComponents` picks the right variant tree.
+    if (component.variants && component.variants.length > 0) {
+      for (const variant of component.variants) {
+        if (Array.isArray(variant.layers)) allLayers.push(...variant.layers);
+      }
+    } else if (Array.isArray(component.layers)) {
       allLayers.push(...component.layers);
     }
   }
@@ -202,9 +210,18 @@ function collectLayersWithComponents(pageLayers: Layer[], components: Component[
       if (layer.componentId && !visitedComponentIds.has(layer.componentId)) {
         visitedComponentIds.add(layer.componentId);
         const component = componentMap.get(layer.componentId);
-        if (component?.layers) {
-          result.push(...component.layers);
-          findComponentRefs(component.layers);
+        if (component) {
+          if (component.variants && component.variants.length > 0) {
+            for (const variant of component.variants) {
+              result.push(...(variant.layers ?? []));
+            }
+            for (const variant of component.variants) {
+              findComponentRefs(variant.layers ?? []);
+            }
+          } else if (component.layers) {
+            result.push(...component.layers);
+            findComponentRefs(component.layers);
+          }
         }
       }
       if (layer.children) {

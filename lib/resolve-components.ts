@@ -4,7 +4,8 @@
  * Applies component variable overrides during resolution
  */
 
-import type { Layer, Component, ComponentVariable, ComponentVariableValue, LayerVariables } from '@/types';
+import type { Layer, Component, ComponentVariable, ComponentVariableValue, LayerVariables, VariantSettingsValue } from '@/types';
+import { getComponentVariantLayers } from './component-variant-utils';
 
 /**
  * Remap collection_layer_id in a FieldVariable using the ID map.
@@ -257,6 +258,7 @@ const OVERRIDE_CATEGORIES: OverrideCategory[] = [
   'audio',
   'video',
   'icon',
+  'variant',
 ];
 
 function findOverrideByVariableId(
@@ -328,6 +330,23 @@ export function applyComponentOverrides(
 ): Layer[] {
   return layers.map(layer => {
     let updatedLayer = { ...layer };
+
+    // If this nested-component instance has its variant choice driven by a
+    // parent component variable, resolve the variant id from the parent's
+    // override (or the variable's default) and stamp it on `componentVariantId`
+    // before `resolveComponents` reads it. The parent variable is generic — it
+    // doesn't carry a target component id — so the variant id might not exist
+    // on this layer's referenced component; in that case
+    // `getComponentVariantLayers` falls back to the first variant.
+    if (layer.componentVariantVariableId) {
+      const variableId = layer.componentVariantVariableId;
+      const variableDef = componentVariables?.find(v => v.id === variableId);
+      const overrideValue = overrides?.variant?.[variableId];
+      const value = (overrideValue ?? variableDef?.default_value) as VariantSettingsValue | undefined;
+      if (value && typeof value === 'object' && 'variant_id' in value && value.variant_id) {
+        updatedLayer = { ...updatedLayer, componentVariantId: value.variant_id };
+      }
+    }
 
     // Check if this layer has a text variable linked
     const linkedTextVariableId = layer.variables?.text?.id;
@@ -555,13 +574,19 @@ export function resolveComponents(
 
       const component = components.find(c => c.id === layer.componentId);
 
-      if (component?.layers?.length) {
+      // Pick the layer tree for the variant this instance is bound to. Falls
+      // back to the first variant when the requested variant no longer exists
+      // (silent fallback for deleted variants) or to the legacy `layers` field
+      // for components stored before the variants migration.
+      const variantLayers = component ? getComponentVariantLayers(component, layer.componentVariantId) : [];
+
+      if (component && variantLayers.length) {
         // Track this component in the resolution chain
         const innerVisited = new Set(visited);
         innerVisited.add(layer.componentId);
 
-        // The component's first layer is the actual content (Section, etc.)
-        const componentContent = component.layers[0];
+        // The variant's first layer is the actual content (Section, etc.)
+        const componentContent = variantLayers[0];
 
         // Recursively resolve nested components, passing current component's
         // variables and this instance's overrides so nested variableLinks resolve correctly

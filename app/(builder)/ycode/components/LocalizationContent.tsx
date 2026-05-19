@@ -789,8 +789,17 @@ export default function LocalizationContent({ children }: LocalizationContentPro
                       </div>
                     ) : (
                       storeComponents.map((component) => {
-                        // Get component draft or fallback to published layers
-                        const layers = componentDrafts[component.id] || component.layers || [];
+                        // Translations live on the master component's primary
+                        // variant. Pick the active draft if there is one,
+                        // otherwise fall back to the persisted variants[0]
+                        // layers (mirrored into `component.layers`).
+                        const draftVariants = componentDrafts[component.id];
+                        const primaryVariantId = component.variants && component.variants.length > 0
+                          ? component.variants[0].id
+                          : null;
+                        const layers = (primaryVariantId && draftVariants?.[primaryVariantId])
+                          || component.layers
+                          || [];
                         const translatableItems = extractComponentTranslatableItems(component, layers);
                         const filteredItems = filterTranslatableItems(translatableItems);
 

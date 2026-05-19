@@ -34,14 +34,22 @@ import LinkSettings, { type LinkSettingsValue } from './LinkSettings';
 import AudioSettings, { type AudioSettingsValue } from './AudioSettings';
 import VideoSettings, { type VideoSettingsValue } from './VideoSettings';
 import IconSettings, { type IconSettingsValue } from './IconSettings';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 
 import { useComponentsStore } from '@/stores/useComponentsStore';
 import { useCollectionsStore } from '@/stores/useCollectionsStore';
 import { createTextComponentVariableValue, extractTiptapFromComponentVariable } from '@/lib/variable-utils';
+import { collectVariantVariableOptions } from '@/lib/component-variant-utils';
 import { VARIABLE_TYPE_ICONS } from './ComponentVariableLabel';
 import { Separator } from '@/components/ui/separator';
 import { cn } from '@/lib/utils';
-import type { ComponentVariable } from '@/types';
+import type { ComponentVariable, VariantSettingsValue } from '@/types';
 
 /** Sortable variable item in the sidebar list. */
 function SortableVariableItem({
@@ -127,9 +135,11 @@ export default function ComponentVariablesDialog({
   const addAudioVariable = useComponentsStore((state) => state.addAudioVariable);
   const addVideoVariable = useComponentsStore((state) => state.addVideoVariable);
   const addIconVariable = useComponentsStore((state) => state.addIconVariable);
+  const addVariantVariable = useComponentsStore((state) => state.addVariantVariable);
   const updateTextVariable = useComponentsStore((state) => state.updateTextVariable);
   const reorderVariables = useComponentsStore((state) => state.reorderVariables);
   const deleteTextVariable = useComponentsStore((state) => state.deleteTextVariable);
+  const allComponents = useComponentsStore((state) => state.components);
   const fields = useCollectionsStore((state) => state.fields);
   const collections = useCollectionsStore((state) => state.collections);
 
@@ -262,6 +272,22 @@ export default function ComponentVariablesDialog({
       setSelectedVariableId(newId);
       setEditingName('Icon');
     }
+  };
+
+  const handleAddVariantVariable = async () => {
+    if (!componentId) return;
+
+    const newId = await addVariantVariable(componentId, 'Variant');
+    if (newId) {
+      setSelectedVariableId(newId);
+      setEditingName('Variant');
+    }
+  };
+
+  const handleVariantDefaultValueChange = (variantId: string) => {
+    if (!componentId || !selectedVariableId) return;
+    const value: VariantSettingsValue = { variant_id: variantId };
+    updateTextVariable(componentId, selectedVariableId, { default_value: value });
   };
 
   // Handle image default value change (via ImageSettings standalone mode)
@@ -413,6 +439,10 @@ export default function ComponentVariablesDialog({
                       <Icon name="video" className="size-3" />
                       Video
                     </DropdownMenuItem>
+                    <DropdownMenuItem onClick={handleAddVariantVariable}>
+                      <Icon name={VARIABLE_TYPE_ICONS['variant']} className="size-3" />
+                      Variant
+                    </DropdownMenuItem>
                   </DropdownMenuContent>
                 </DropdownMenu>
               </div>
@@ -525,7 +555,43 @@ export default function ComponentVariablesDialog({
                         value={selectedVariable.default_value as IconSettingsValue}
                         onChange={handleIconDefaultValueChange}
                       />
-                    ) : selectedVariable.type === 'rich_text' ? (
+                    ) : selectedVariable.type === 'variant' ? (() => {
+                      const options = collectVariantVariableOptions(component, allComponents, selectedVariable.id);
+                      const currentDefault = (selectedVariable.default_value as VariantSettingsValue | undefined)?.variant_id;
+                      // Group options by component for clearer labelling when
+                      // the variable is generic and links across multiple
+                      // nested components.
+                      const componentIds = Array.from(new Set(options.map(o => o.component_id)));
+                      const showComponentName = componentIds.length > 1;
+
+                      if (options.length === 0) {
+                        return (
+                          <p className="text-xs text-muted-foreground py-2">
+                            Link this variable from a nested component instance to choose a default variant.
+                          </p>
+                        );
+                      }
+
+                      return (
+                        <Select
+                          value={currentDefault ?? ''}
+                          onValueChange={handleVariantDefaultValueChange}
+                        >
+                          <SelectTrigger className="w-full">
+                            <SelectValue placeholder="Select default variant" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {options.map((opt) => (
+                              <SelectItem key={`${opt.component_id}-${opt.variant_id}`} value={opt.variant_id}>
+                                {showComponentName
+                                  ? `${opt.component_name} · ${opt.variant_name}`
+                                  : opt.variant_name}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      );
+                    })() : selectedVariable.type === 'rich_text' ? (
                       <ExpandableRichTextEditor
                         value={editingDefaultValue}
                         onChange={handleDefaultValueChange}

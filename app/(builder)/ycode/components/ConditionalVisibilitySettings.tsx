@@ -213,6 +213,7 @@ export default function ConditionalVisibilitySettings({
   const draftsByPageId = usePagesStore((state) => state.draftsByPageId);
   const currentPageId = useEditorStore((state) => state.currentPageId);
   const editingComponentId = useEditorStore((state) => state.editingComponentId);
+  const editingComponentVariantId = useEditorStore((state) => state.editingComponentVariantId);
   const componentDrafts = useComponentsStore((state) => state.componentDrafts);
 
   // Get all collection layers on the page
@@ -221,14 +222,18 @@ export default function ConditionalVisibilitySettings({
 
     let layers: Layer[] = [];
     if (editingComponentId) {
-      layers = componentDrafts[editingComponentId] || [];
+      const variantDrafts = componentDrafts[editingComponentId];
+      const variantId = (editingComponentVariantId && variantDrafts?.[editingComponentVariantId])
+        ? editingComponentVariantId
+        : (variantDrafts ? Object.keys(variantDrafts)[0] : null);
+      layers = (variantId && variantDrafts) ? variantDrafts[variantId] || [] : [];
     } else {
       const draft = draftsByPageId[currentPageId];
       layers = draft ? draft.layers : [];
     }
 
     return findAllCollectionLayers(layers);
-  }, [currentPageId, editingComponentId, componentDrafts, draftsByPageId]);
+  }, [currentPageId, editingComponentId, editingComponentVariantId, componentDrafts, draftsByPageId]);
 
   // Initialize groups from layer data
   const groups: VisibilityConditionGroup[] = useMemo(() => {

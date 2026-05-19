@@ -31,6 +31,7 @@ import { hasComponentOrVariable } from '@/lib/tiptap-utils';
 import LayerContextMenu from '@/app/(builder)/ycode/components/LayerContextMenu';
 import CanvasTextEditor from '@/app/(builder)/ycode/components/CanvasTextEditor';
 import { useComponentsStore } from '@/stores/useComponentsStore';
+import { getComponentVariantLayers } from '@/lib/component-variant-utils';
 import { useCollectionLayerStore } from '@/stores/useCollectionLayerStore';
 import { useFilterStore } from '@/stores/useFilterStore';
 import { useCollectionsStore } from '@/stores/useCollectionsStore';
@@ -1175,9 +1176,27 @@ const LayerItemImpl: React.FC<{
   // injectTranslatedText pass on the serialized page layers. Without injecting
   // here, component content would always render in the default language even
   // when the user previews a non-default locale on a page.
+  // If this nested-component instance has its variant choice driven by a
+  // parent component variable, resolve the effective variant id from the
+  // parent's override (or the variable's default). Mirrors the SSR branch in
+  // `applyComponentOverrides`; without this the canvas keeps using the
+  // baked-in `componentVariantId` and ignores instance-level overrides.
+  const effectiveVariantId = useMemo(() => {
+    const linkedId = layer.componentVariantVariableId;
+    if (!linkedId) return layer.componentVariantId;
+    const variableDef = parentComponentVariables?.find(v => v.id === linkedId);
+    const overrideValue = parentComponentOverrides?.variant?.[linkedId];
+    const value = (overrideValue ?? variableDef?.default_value) as { variant_id?: string } | undefined;
+    return value?.variant_id ?? layer.componentVariantId;
+  }, [layer.componentVariantVariableId, layer.componentVariantId, parentComponentVariables, parentComponentOverrides]);
+
   const transformedComponentLayers = useMemo(() => {
-    if (!isEditMode || !component?.layers?.length) return null;
-    const transformed = transformLayerIdsForInstance(component.layers, layer.id);
+    if (!isEditMode || !component) return null;
+    // Pick the variant the instance is bound to (silently falls back to the
+    // first variant when the requested one was deleted).
+    const variantLayers = getComponentVariantLayers(component, effectiveVariantId);
+    if (!variantLayers.length) return null;
+    const transformed = transformLayerIdsForInstance(variantLayers, layer.id);
     if (!currentLocale || currentLocale.is_default || !translations) {
       return transformed;
     }
@@ -1185,7 +1204,7 @@ const LayerItemImpl: React.FC<{
       includeIncomplete: true,
       defaultMasterComponentId: component.id,
     });
-  }, [isEditMode, component, layer.id, currentLocale, translations, pageId]);
+  }, [isEditMode, component, layer.id, effectiveVariantId, currentLocale, translations, pageId]);
 
   // Collect hidden layer IDs from the component's transformed layers
   // Needed because Canvas computes editorHiddenLayerIds from serializeLayers (different ID transform)

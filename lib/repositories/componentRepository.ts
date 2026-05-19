@@ -7,10 +7,11 @@
  */
 
 import { getSupabaseAdmin } from '@/lib/supabase-server';
-import type { Component, Layer } from '@/types';
+import type { Component, ComponentVariant, Layer } from '@/types';
 import { generateComponentContentHash } from '../hash-utils';
 import { deleteTranslationsInBulk, markTranslationsIncomplete } from '@/lib/repositories/translationRepository';
 import { extractLayerContentMap } from '../localisation-utils';
+import { generateId } from '../utils';
 
 /**
  * Input data for creating a new component
@@ -19,6 +20,16 @@ export interface CreateComponentData {
   name: string;
   layers: Layer[];
   variables?: any[]; // Component variables for exposed properties
+  variants?: ComponentVariant[]; // Optional explicit variants; defaults to a single "Default"
+}
+
+/**
+ * Build a variants array from a layers tree. Used when seeding a new component
+ * or when persisting a `variants` change so the legacy `layers` column always
+ * mirrors `variants[0].layers`.
+ */
+function defaultVariantsFromLayers(layers: Layer[]): ComponentVariant[] {
+  return [{ id: generateId('cmpvar'), name: 'Default', layers }];
 }
 
 /**
@@ -120,20 +131,30 @@ export async function createComponent(
     throw new Error('Failed to initialize Supabase client');
   }
 
-  // Calculate content hash
+  // Variants are the source of truth; seed a "Default" variant from `layers`
+  // when none was provided so older callers keep working.
+  const variants: ComponentVariant[] = componentData.variants && componentData.variants.length > 0
+    ? componentData.variants
+    : defaultVariantsFromLayers(componentData.layers);
+  const primaryLayers = variants[0]?.layers ?? componentData.layers;
+
+  // Calculate content hash — includes every variant so non-primary variant
+  // edits are detected by `getUnpublishedComponents`.
   const contentHash = generateComponentContentHash({
     name: componentData.name,
-    layers: componentData.layers,
+    layers: primaryLayers,
     variables: componentData.variables,
+    variants,
   });
 
   const insertData: any = {
     name: componentData.name,
-    layers: componentData.layers,
+    layers: primaryLayers,
+    variants,
     content_hash: contentHash,
     is_published: false,
   };
-  
+
   // Include variables if provided
   if (componentData.variables?.length) {
     insertData.variables = componentData.variables;
@@ -153,11 +174,17 @@ export async function createComponent(
 }
 
 /**
- * Update a component and recalculate content hash
+ * Update a component and recalculate content hash.
+ *
+ * `variants` is the source of truth for the layer trees. When `variants` is
+ * provided, the legacy `layers` column is mirrored to `variants[0].layers` so
+ * any reader that has not been migrated to variants still works. When only
+ * `layers` is provided, `variants[0].layers` is updated in place and the rest
+ * of the variants are preserved.
  */
 export async function updateComponent(
   id: string,
-  updates: Partial<Pick<Component, 'name' | 'layers' | 'variables'>>
+  updates: Partial<Pick<Component, 'name' | 'layers' | 'variables' | 'variants'>>
 ): Promise<Component> {
   const client = await getSupabaseAdmin();
   if (!client) {
@@ -170,44 +197,60 @@ export async function updateComponent(
     throw new Error('Component not found');
   }
 
-  // Detect removed and changed layer content if layers are being updated
-  if (updates.layers !== undefined) {
-    const oldContentMap = extractLayerContentMap(current.layers || [], 'component', id);
-    const newContentMap = extractLayerContentMap(updates.layers, 'component', id);
+  // Reconcile variants and layers so they stay in sync regardless of which one
+  // the caller updated.
+  const currentVariants: ComponentVariant[] = current.variants && current.variants.length > 0
+    ? current.variants
+    : defaultVariantsFromLayers(current.layers || []);
 
-    // Find removed keys (exist in old but not in new)
+  let finalVariants: ComponentVariant[] = currentVariants;
+  if (updates.variants !== undefined) {
+    finalVariants = updates.variants.length > 0
+      ? updates.variants
+      : defaultVariantsFromLayers([]);
+  } else if (updates.layers !== undefined) {
+    finalVariants = currentVariants.map((v, i) => (i === 0 ? { ...v, layers: updates.layers! } : v));
+  }
+  const finalLayers = finalVariants[0]?.layers ?? (updates.layers ?? current.layers ?? []);
+
+  // Detect removed and changed layer content for translation bookkeeping.
+  // We only consider the primary variant layers because translations for the
+  // other variants will be tracked through their own update events.
+  const oldPrimaryLayers = current.layers || [];
+  if (oldPrimaryLayers !== finalLayers) {
+    const oldContentMap = extractLayerContentMap(oldPrimaryLayers, 'component', id);
+    const newContentMap = extractLayerContentMap(finalLayers, 'component', id);
+
     const removedKeys = Object.keys(oldContentMap).filter(key => !(key in newContentMap));
-
-    // Find changed keys (exist in both but value differs)
     const changedKeys = Object.keys(newContentMap).filter(
       key => key in oldContentMap && oldContentMap[key] !== newContentMap[key]
     );
 
-    // Delete translations for removed content
     if (removedKeys.length > 0) {
       await deleteTranslationsInBulk('component', id, removedKeys);
     }
-
-    // Mark translations as incomplete for changed content
     if (changedKeys.length > 0) {
       await markTranslationsIncomplete('component', id, changedKeys);
     }
   }
 
-  // Merge current data with updates for hash calculation
-  const finalData = {
-    name: updates.name !== undefined ? updates.name : current.name,
-    layers: updates.layers !== undefined ? updates.layers : current.layers,
-    variables: updates.variables !== undefined ? updates.variables : current.variables,
-  };
-
-  // Recalculate content hash
-  const contentHash = generateComponentContentHash(finalData);
+  // Recalculate content hash from the final, merged data.
+  const finalName = updates.name !== undefined ? updates.name : current.name;
+  const finalVariables = updates.variables !== undefined ? updates.variables : current.variables;
+  const contentHash = generateComponentContentHash({
+    name: finalName,
+    layers: finalLayers,
+    variables: finalVariables,
+    variants: finalVariants,
+  });
 
   const { data, error } = await client
     .from('components')
     .update({
-      ...updates,
+      ...(updates.name !== undefined ? { name: updates.name } : {}),
+      ...(updates.variables !== undefined ? { variables: updates.variables } : {}),
+      layers: finalLayers,
+      variants: finalVariants,
       content_hash: contentHash,
       updated_at: new Date().toISOString(),
     })
@@ -274,6 +317,7 @@ export async function publishComponent(draftComponentId: string): Promise<Compon
       id: draftComponent.id, // Same ID for draft and published versions
       name: draftComponent.name,
       layers: draftComponent.layers,
+      variants: draftComponent.variants,
       variables: draftComponent.variables,
       content_hash: draftComponent.content_hash, // Copy hash from draft
       is_published: true,
@@ -346,6 +390,7 @@ export async function publishComponents(componentIds: string[]): Promise<{ count
       id: draft.id,
       name: draft.name,
       layers: draft.layers,
+      variants: draft.variants,
       variables: draft.variables,
       content_hash: draft.content_hash,
       is_published: true,

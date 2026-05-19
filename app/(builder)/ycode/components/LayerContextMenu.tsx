@@ -133,6 +133,17 @@ function LayerContextMenuInner({
   const getComponentById = useComponentsStore((state) => state.getComponentById);
   const components = useComponentsStore((state) => state.components);
   const componentDrafts = useComponentsStore((state) => state.componentDrafts);
+  const editingComponentVariantId = useEditorStore((state) => state.editingComponentVariantId);
+  // Resolve the active variant id for the component being edited. When
+  // unspecified (or pointing at a missing variant) we fall back to the first
+  // variant so the editor never shows an empty tree.
+  const activeVariantId = useMemo(() => {
+    if (!editingComponentId) return null;
+    const drafts = componentDrafts[editingComponentId];
+    if (!drafts) return editingComponentVariantId || null;
+    if (editingComponentVariantId && drafts[editingComponentVariantId]) return editingComponentVariantId;
+    return Object.keys(drafts)[0] || null;
+  }, [editingComponentId, editingComponentVariantId, componentDrafts]);
   const updateComponentDraft = useComponentsStore((state) => state.updateComponentDraft);
   const createComponentFromComponentLayer = useComponentsStore((state) => state.createComponentFromLayer);
 
@@ -151,14 +162,14 @@ function LayerContextMenuInner({
   const hasStyleClipboard = copiedStyle !== null;
   const hasInteractionsClipboard = copiedInteractions !== null;
 
-  // Resolve layers: component draft when editing a component, else page draft
+  // Resolve layers: active variant draft when editing a component, else page draft
   const isComponentContext = !!editingComponentId;
   const layers = useMemo(
     () =>
-      isComponentContext
-        ? (componentDrafts[editingComponentId!] || [])
+      isComponentContext && editingComponentId && activeVariantId
+        ? (componentDrafts[editingComponentId]?.[activeVariantId] || [])
         : (draftsByPageId[pageId]?.layers || []),
-    [isComponentContext, editingComponentId, componentDrafts, draftsByPageId, pageId]
+    [isComponentContext, editingComponentId, activeVariantId, componentDrafts, draftsByPageId, pageId]
   );
   const layer = findLayerById(layers, layerId);
 
@@ -197,18 +208,20 @@ function LayerContextMenuInner({
     return canDeleteLayer(layer);
   }, [layer]);
 
-  /** Update component draft layers and broadcast to collaborators */
+  /** Update active variant draft layers and broadcast to collaborators */
   const updateComponentAndBroadcast = (newLayers: Layer[]) => {
-    if (!editingComponentId) return;
-    updateComponentDraft(editingComponentId, newLayers);
+    if (!editingComponentId || !activeVariantId) return;
+    updateComponentDraft(editingComponentId, activeVariantId, newLayers);
     if (liveComponentUpdates) {
       liveComponentUpdates.broadcastComponentLayersUpdate(editingComponentId, newLayers);
     }
   };
 
-  /** Get current component layers for the editing context */
+  /** Get current variant layers for the editing context */
   const getComponentLayers = () =>
-    editingComponentId ? (componentDrafts[editingComponentId] || []) : [];
+    editingComponentId && activeVariantId
+      ? (componentDrafts[editingComponentId]?.[activeVariantId] || [])
+      : [];
 
   const handleCopy = () => {
     if (!canCopy) return;
@@ -449,17 +462,24 @@ function LayerContextMenuInner({
   const handleEditMasterComponent = async () => {
     if (!layer?.componentId) return;
 
-    const { setEditingComponentId, setSelectedLayerId, pushComponentNavigation, editingComponentId } = useEditorStore.getState();
-    const { loadComponentDraft, getComponentById } = useComponentsStore.getState();
+    const { setEditingComponentId, setSelectedLayerId, setEditingComponentVariantId, editingComponentVariantId, pushComponentNavigation, editingComponentId } = useEditorStore.getState();
+    const { loadComponentDraft, getComponentById, getComponentDraftLayers } = useComponentsStore.getState();
     const { pages } = usePagesStore.getState();
 
+    const component = getComponentById(layer.componentId);
+    if (!component) return;
+
+    // Resolve which variant to open — use the instance's configured variant
+    const requestedVariantId = layer.componentVariantId;
+    const targetVariantId = (requestedVariantId && component.variants?.some(v => v.id === requestedVariantId))
+      ? requestedVariantId
+      : (component.variants && component.variants.length > 0 ? component.variants[0].id : null);
+
     // Capture the current layer ID BEFORE clearing selection
-    // This is the layer we'll return to when exiting component edit mode
     const componentInstanceLayerId = layer.id;
 
     // Push current context to navigation stack before entering component edit mode
     if (editingComponentId) {
-      // We're currently editing a component, push it to stack
       const currentComponent = getComponentById(editingComponentId);
       if (currentComponent) {
         pushComponentNavigation({
@@ -467,10 +487,10 @@ function LayerContextMenuInner({
           id: editingComponentId,
           name: currentComponent.name,
           layerId: layer.id,
+          variantId: editingComponentVariantId ?? null,
         });
       }
     } else if (pageId) {
-      // We're on a page, push it to stack
       const currentPage = pages.find((p) => p.id === pageId);
       if (currentPage) {
         pushComponentNavigation({
@@ -483,23 +503,22 @@ function LayerContextMenuInner({
     }
 
     // Clear selection FIRST to release lock on current page's channel
-    // before switching to component's channel
     setSelectedLayerId(null);
 
-    // Enter edit mode (changes lock channel to component)
-    // Pass the component instance layer ID so we can restore it when exiting
+    // Enter edit mode and set the target variant
     setEditingComponentId(layer.componentId, pageId, componentInstanceLayerId);
+    setEditingComponentVariantId(targetVariantId);
 
     // Load component into draft (async to ensure proper cache sync)
     await loadComponentDraft(layer.componentId);
 
-    // Select root layer only if user hasn't already selected a valid component layer during the await
-    const component = getComponentById(layer.componentId);
-    if (component && component.layers && component.layers.length > 0) {
+    // Select root layer of the target variant's tree
+    const variantLayers = getComponentDraftLayers(layer.componentId, targetVariantId);
+    if (variantLayers && variantLayers.length > 0) {
       const currentSelection = useEditorStore.getState().selectedLayerId;
-      const hasValidSelection = currentSelection && findLayerById(component.layers, currentSelection);
+      const hasValidSelection = currentSelection && findLayerById(variantLayers, currentSelection);
       if (!hasValidSelection) {
-        setSelectedLayerId(component.layers[0].id);
+        setSelectedLayerId(variantLayers[0].id);
       }
     }
   };
@@ -512,8 +531,8 @@ function LayerContextMenuInner({
     // Use the shared utility function for detaching
     const newLayers = detachSpecificLayerFromComponent(layers, layerId, component || undefined);
 
-    if (isComponentContext && editingComponentId) {
-      updateComponentDraft(editingComponentId, newLayers);
+    if (isComponentContext && editingComponentId && activeVariantId) {
+      updateComponentDraft(editingComponentId, activeVariantId, newLayers);
     } else {
       setDraftLayers(pageId, newLayers);
     }

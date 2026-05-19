@@ -36,6 +36,7 @@ export interface ComponentNavigationEntry {
   id: string; // pageId or componentId
   name: string; // Display name for breadcrumb
   layerId?: string | null; // Layer to restore when returning
+  variantId?: string | null; // Variant to restore when returning to a component
 }
 
 export type EditorSidebarTab = 'layers' | 'pages' | 'cms';
@@ -77,6 +78,7 @@ interface EditorActions {
   setActiveUIState: (state: UIState) => void;
   setActiveTextStyleKey: (key: string | null) => void;
   setEditingComponentId: (id: string | null, returnPageId?: string | null, returnToLayerId?: string | null) => void;
+  setEditingComponentVariantId: (id: string | null) => void;
   pushComponentNavigation: (entry: ComponentNavigationEntry) => void;
   getReturnDestination: () => ComponentNavigationEntry | null;
   setBuilderDataPreloaded: (preloaded: boolean) => void;
@@ -127,6 +129,10 @@ interface EditorStoreWithHistory extends EditorState {
   historyIndex: number;
   maxHistorySize: number;
   editingComponentId: string | null;
+  // Currently selected variant id while editing a component. `null` means
+  // "use the first variant" (also the default for components with a single
+  // variant). Cleared whenever `editingComponentId` is cleared.
+  editingComponentVariantId: string | null;
   returnToPageId: string | null;
   returnToLayerId: string | null; // Layer to restore when exiting component edit mode
   componentNavigationStack: ComponentNavigationEntry[]; // Breadcrumb stack for nested component editing
@@ -225,6 +231,7 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
   historyIndex: -1,
   maxHistorySize: 50,
   editingComponentId: null,
+  editingComponentVariantId: null,
   returnToPageId: null,
   returnToLayerId: null,
   componentNavigationStack: [],
@@ -445,11 +452,16 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
 
     set({
       editingComponentId: id,
+      // Clear the active variant when leaving component edit mode; callers
+      // entering edit mode are expected to set the variant explicitly
+      // (`use-edit-component` does this once the draft has loaded).
+      editingComponentVariantId: id === null ? null : get().editingComponentVariantId,
       returnToPageId: returnPageId,
       returnToLayerId: layerToReturn,
       componentNavigationStack: newStack,
     });
   },
+  setEditingComponentVariantId: (id: string | null) => set({ editingComponentVariantId: id }),
   setBuilderDataPreloaded: (preloaded) => set({ builderDataPreloaded: preloaded }),
 
   /**

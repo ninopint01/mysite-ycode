@@ -1251,8 +1251,13 @@ export default function LayersTree({
     // Update layer first so the label shows the new name immediately
     if (editingComponentId) {
       const { componentDrafts } = useComponentsStore.getState();
-      const compLayers = componentDrafts[editingComponentId] || [];
-      updateComponentDraft(editingComponentId, updateLayerProps(compLayers, id, { customName: value }));
+      const variantId = useEditorStore.getState().editingComponentVariantId;
+      const variantDrafts = componentDrafts[editingComponentId];
+      const targetVariantId = (variantId && variantDrafts?.[variantId]) ? variantId : (variantDrafts ? Object.keys(variantDrafts)[0] : null);
+      if (targetVariantId && variantDrafts) {
+        const compLayers = variantDrafts[targetVariantId] || [];
+        updateComponentDraft(editingComponentId, targetVariantId, updateLayerProps(compLayers, id, { customName: value }));
+      }
     } else {
       updateLayer(pageId, id, { customName: value });
     }
@@ -1272,8 +1277,13 @@ export default function LayersTree({
 
     if (editingComponentId) {
       const { componentDrafts } = useComponentsStore.getState();
-      const compLayers = componentDrafts[editingComponentId] || [];
-      updateComponentDraft(editingComponentId, updateLayerProps(compLayers, id, updates));
+      const variantId = useEditorStore.getState().editingComponentVariantId;
+      const variantDrafts = componentDrafts[editingComponentId];
+      const targetVariantId = (variantId && variantDrafts?.[variantId]) ? variantId : (variantDrafts ? Object.keys(variantDrafts)[0] : null);
+      if (targetVariantId && variantDrafts) {
+        const compLayers = variantDrafts[targetVariantId] || [];
+        updateComponentDraft(editingComponentId, targetVariantId, updateLayerProps(compLayers, id, updates));
+      }
     } else {
       updateLayer(pageId, id, updates);
     }

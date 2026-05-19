@@ -210,10 +210,18 @@ export const useLayerStylesStore = create<LayerStylesStore>((set, get) => ({
                 ),
               }));
 
-              // Also update component draft if it's currently being edited
-              const currentDraft = componentsStore.componentDrafts[entity.id];
-              if (currentDraft) {
-                componentsStore.updateComponentDraft(entity.id, entity.newLayers);
+              // Also update the primary variant draft if a working copy
+              // exists. Style detach happens against the legacy `layers`
+              // field, which mirrors variants[0].
+              const variantDrafts = componentsStore.componentDrafts[entity.id];
+              if (variantDrafts) {
+                const updatedComponent = useComponentsStore.getState().getComponentById(entity.id);
+                const primaryVariantId = updatedComponent?.variants && updatedComponent.variants.length > 0
+                  ? updatedComponent.variants[0].id
+                  : Object.keys(variantDrafts)[0];
+                if (primaryVariantId) {
+                  componentsStore.updateComponentDraft(entity.id, primaryVariantId, entity.newLayers);
+                }
               }
             }
           }

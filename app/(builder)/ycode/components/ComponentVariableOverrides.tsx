@@ -18,6 +18,13 @@ import AudioSettings from './AudioSettings';
 import VideoSettings from './VideoSettings';
 import IconSettings from './IconSettings';
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
+import {
   extractTiptapFromComponentVariable,
   createTextComponentVariableValue,
   tiptapEqual,
@@ -30,11 +37,13 @@ import type {
   AudioSettingsValue,
   VideoSettingsValue,
   IconSettingsValue,
+  VariantSettingsValue,
   Layer,
   CollectionField,
   Collection,
 } from '@/types';
 import type { FieldGroup } from '@/lib/collection-field-utils';
+import type { VariantVariableOption } from '@/lib/component-variant-utils';
 
 type Overrides = Layer['componentOverrides'];
 
@@ -67,6 +76,11 @@ interface ComponentVariableOverridesProps {
   onCreateOverrideVariable?: (childVariable: ComponentVariable) => void;
   /** Called to open the variables dialog, optionally focused on a specific variable */
   onManageVariables?: (variableId?: string) => void;
+  /** Resolves the variant Select options for a given `'variant'` variable. The
+   *  caller (which has access to the parent component object) walks the tree
+   *  to produce these — see `collectVariantVariableOptions`. Required for the
+   *  variant override case to render a Select. */
+  getVariantVariableOptions?: (variableId: string) => VariantVariableOption[];
 }
 
 export default function ComponentVariableOverrides({
@@ -85,6 +99,7 @@ export default function ComponentVariableOverrides({
   onUnlinkOverrideVariable,
   onCreateOverrideVariable,
   onManageVariables,
+  getVariantVariableOptions,
 }: ComponentVariableOverridesProps) {
   const getTextOverrideCategory = useCallback(
     (variableId: string): 'text' | 'rich_text' => {
@@ -209,10 +224,15 @@ export default function ComponentVariableOverrides({
     );
   };
 
-  const renderLabel = (variable: ComponentVariable) => {
+  const renderLabel = (variable: ComponentVariable, options?: { centered?: boolean }) => {
+    // Single-line controls (e.g. the variant Select) live in `items-center`
+    // rows; the default `pt-2` / `py-1` spacing is for multi-line controls
+    // (image/text/etc.) that anchor the label to the top of the row.
+    const centered = options?.centered ?? false;
+
     if (!isEditingComponent) {
       return (
-        <Label variant="muted" className="truncate pt-2">
+        <Label variant="muted" className={cn('truncate', !centered && 'pt-2')}>
           {variable.name}
         </Label>
       );
@@ -221,7 +241,7 @@ export default function ComponentVariableOverrides({
     const linkedParentVar = getLinkedParentVar(variable.id);
 
     return (
-      <div className="flex items-start gap-1 py-1">
+      <div className={cn('flex gap-1', centered ? 'items-center' : 'items-start py-1')}>
         <ComponentVariableLabel
           label={variable.name}
           isEditingComponent
@@ -365,6 +385,44 @@ export default function ComponentVariableOverrides({
             </div>
           </div>
         );
+      case 'variant': {
+        const options = getVariantVariableOptions?.(variable.id) ?? [];
+        const currentValue = getTypedValue('variant' as 'icon', variable.id) as VariantSettingsValue | undefined;
+        const componentIds = Array.from(new Set(options.map(o => o.component_id)));
+        const showComponentName = componentIds.length > 1;
+        const variantLabel = renderLabel(variable, { centered: true });
+
+        return (
+          <div key={variable.id} className="grid grid-cols-3 gap-2 items-center">
+            {variantLabel}
+            <div className="col-span-2 *:w-full">
+              {options.length === 0 ? (
+                <p className="text-xs text-muted-foreground py-2">
+                  Link this variable from a nested component.
+                </p>
+              ) : (
+                <Select
+                  value={currentValue?.variant_id ?? ''}
+                  onValueChange={(val) => handleTypedChange('variant' as 'icon', variable.id, { variant_id: val })}
+                >
+                  <SelectTrigger className="w-full">
+                    <SelectValue placeholder="Variant" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {options.map((opt) => (
+                      <SelectItem key={`${opt.component_id}-${opt.variant_id}`} value={opt.variant_id}>
+                        {showComponentName
+                          ? `${opt.component_name} · ${opt.variant_name}`
+                          : opt.variant_name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              )}
+            </div>
+          </div>
+        );
+      }
       case 'rich_text':
       default:
         return (

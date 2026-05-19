@@ -8,6 +8,7 @@ import { resolveInlineVariablesFromData } from '@/lib/inline-variables';
 import { DEFAULT_TEXT_STYLES } from '@/lib/text-format-utils';
 import { getCmsFieldBinding } from '@/lib/tiptap-utils';
 import { applyComponentOverrides } from '@/lib/resolve-components';
+import { getComponentVariantLayers } from '@/lib/component-variant-utils';
 import { resolveFieldFromSources } from '@/lib/cms-variables-utils';
 import { isDatePreset, resolveDateFilterValue } from '@/lib/collection-field-utils';
 import { parseMultiReferenceValue } from '@/lib/collection-utils';
@@ -2360,12 +2361,16 @@ function resolveComponentsInLayers(
 
       const component = components.find(c => c.id === layer.componentId);
 
-      if (component && component.layers && component.layers.length > 0) {
+      // Pick the variant layer tree this instance is bound to (silent fallback
+      // to the first variant when the requested one was deleted).
+      const variantLayers = component ? getComponentVariantLayers(component, layer.componentVariantId) : [];
+
+      if (component && variantLayers.length > 0) {
         const innerVisited = new Set(visited);
         innerVisited.add(layer.componentId);
 
-        // The component's first layer is the actual content (Section, etc.)
-        const componentContent = component.layers[0];
+        // The variant's first layer is the actual content (Section, etc.)
+        const componentContent = variantLayers[0];
 
         // Transform all component children with instance-specific IDs
         // This ensures unique layer IDs when multiple instances of the same component exist

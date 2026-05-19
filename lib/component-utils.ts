@@ -238,6 +238,10 @@ export function applyComponentToLayer(layer: Layer, component: Component): Layer
   };
 }
 
+// `getComponentVariantLayers` lives in `lib/component-variant-utils.ts` to
+// avoid a circular import between this module and `lib/layer-utils.ts`.
+export { getComponentVariantLayers } from './component-variant-utils';
+
 /**
  * Detach component from a layer
  * Removes the component link but keeps the layer's own properties

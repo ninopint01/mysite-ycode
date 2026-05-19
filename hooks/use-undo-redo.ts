@@ -232,7 +232,17 @@ export function useUndoRedo({
         return draft?.layers || [];
       }
       case 'component': {
-        return componentDrafts[entityId] || [];
+        // Undo/redo currently tracks the component's primary variant. Saving
+        // already records the primary variant's layer tree as the version
+        // payload; reading from the same variant keeps the two consistent.
+        const variantDrafts = componentDrafts[entityId];
+        if (!variantDrafts) return [];
+        const componentEntry = useComponentsStore.getState().getComponentById(entityId);
+        const primaryVariantId = componentEntry?.variants && componentEntry.variants.length > 0
+          ? componentEntry.variants[0].id
+          : Object.keys(variantDrafts)[0];
+        if (!primaryVariantId) return [];
+        return variantDrafts[primaryVariantId] || [];
       }
       case 'layer_style': {
         const style = styles.find((s) => s.id === entityId);
@@ -263,7 +273,15 @@ export function useUndoRedo({
               console.error('   Layer IDs in state:', layerIds);
             }
           }
-          updateComponentDraft(entityId, state as Layer[]);
+          // Apply to the component's primary variant — see getCurrentState.
+          const variantDrafts = useComponentsStore.getState().componentDrafts[entityId];
+          const componentEntry = useComponentsStore.getState().getComponentById(entityId);
+          const primaryVariantId = componentEntry?.variants && componentEntry.variants.length > 0
+            ? componentEntry.variants[0].id
+            : (variantDrafts ? Object.keys(variantDrafts)[0] : null);
+          if (primaryVariantId) {
+            updateComponentDraft(entityId, primaryVariantId, state as Layer[]);
+          }
           break;
         }
         case 'layer_style': {

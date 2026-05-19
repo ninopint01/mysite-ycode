@@ -12,6 +12,7 @@ import { getCollectionVariable, resolveFieldValue, evaluateVisibility, getLayerH
 import { isFieldVariable, isAssetVariable, createDynamicTextVariable, createDynamicRichTextVariable, createAssetVariable, getDynamicTextContent, getVariableStringValue, getAssetId, resolveDesignStyles } from '@/lib/variable-utils';
 import { generateImageSrcset, getImageSizes, getOptimizedImageUrl, getAssetProxyUrl, DEFAULT_ASSETS, collectLayerAssetIds } from '@/lib/asset-utils';
 import { resolveComponents, applyComponentOverrides } from '@/lib/resolve-components';
+import { getComponentVariantLayers } from '@/lib/component-variant-utils';
 import { isTiptapDoc, hasBlockElementsWithResolver } from '@/lib/tiptap-utils';
 import { castValue } from '@/lib/collection-utils';
 import { DEFAULT_TEXT_STYLES } from '@/lib/text-format-utils';
@@ -1608,12 +1609,16 @@ async function resolveTiptapComponentCollections(
     // Prevent circular resolution (component embedding itself)
     if (!ancestorComponentIds?.has(componentId)) {
       const comp = components.find(c => c.id === componentId);
-      if (comp?.layers?.length) {
+      // Pick the variant the rich-text node is bound to (falls back to the
+      // first/Default variant when no variant is selected or the requested
+      // one was deleted).
+      const compVariantLayers = comp ? getComponentVariantLayers(comp, node.attrs.componentVariantId) : [];
+      if (comp && compVariantLayers.length) {
         const childAncestors = new Set(ancestorComponentIds);
         childAncestors.add(componentId);
 
         const overrides = node.attrs.componentOverrides ?? undefined;
-        const withOverrides = applyComponentOverrides(comp.layers, overrides, comp.variables);
+        const withOverrides = applyComponentOverrides(compVariantLayers, overrides, comp.variables);
         const withComponents = resolveComponents(withOverrides, components, comp.variables, overrides);
         const withCollections = await resolveCollectionLayers(withComponents, isPublished, undefined, undefined, translations);
 

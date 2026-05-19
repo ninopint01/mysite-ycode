@@ -219,22 +219,35 @@ async function collectAllLayers(pageLayers: Layer[]): Promise<Layer[]> {
   const { useComponentsStore } = await import('@/stores/useComponentsStore');
   const { components, componentDrafts } = useComponentsStore.getState();
 
-  // Track which components have drafts
+  // `componentDrafts` is keyed by component id then variant id since the
+  // variants refactor (`Record<componentId, Record<variantId, Layer[]>>`).
+  // Track which components have any working draft at all.
   const draftComponentIds = new Set(Object.keys(componentDrafts));
 
   // Collect layers from all components (prefer drafts over saved versions)
   const componentLayers: Layer[] = [];
 
-  // Add component drafts first (these are the latest edits)
-  Object.values(componentDrafts).forEach((layers) => {
-    if (layers && Array.isArray(layers)) {
-      componentLayers.push(...layers);
-    }
+  // Add component drafts first (these are the latest edits). Walk every
+  // variant so classes that only appear in non-primary variants make it into
+  // the compiled stylesheet.
+  Object.values(componentDrafts).forEach((variantMap) => {
+    if (!variantMap || typeof variantMap !== 'object') return;
+    Object.values(variantMap).forEach((variantLayers) => {
+      if (Array.isArray(variantLayers)) {
+        componentLayers.push(...variantLayers);
+      }
+    });
   });
 
-  // Add saved components that don't have drafts
+  // Add saved components that don't have drafts. Same reason as above:
+  // include every variant so e.g. `bg-[#35b7d4]` on Variant 3 is compiled.
   components.forEach((component: Component) => {
-    if (!draftComponentIds.has(component.id) && component.layers && Array.isArray(component.layers)) {
+    if (draftComponentIds.has(component.id)) return;
+    if (component.variants && component.variants.length > 0) {
+      component.variants.forEach((variant) => {
+        if (Array.isArray(variant.layers)) componentLayers.push(...variant.layers);
+      });
+    } else if (Array.isArray(component.layers)) {
       componentLayers.push(...component.layers);
     }
   });

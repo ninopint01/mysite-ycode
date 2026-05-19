@@ -157,23 +157,38 @@ export function generatePageContentHash(
  * Generate a hash for component content
  * Strip UI-only properties (like 'open') before hashing to prevent false changes
  *
- * @param componentData - Component name and layers
+ * Includes every variant's layer tree so edits to non-primary variants
+ * (e.g. "Large") are correctly detected as changes that need republishing.
+ *
+ * @param componentData - Component name, layers, variables, and variants
  * @returns Content hash
  */
 export function generateComponentContentHash(componentData: {
   name: string;
   layers: any;
   variables?: any;
+  variants?: Array<{ id: string; name: string; layers: any }>;
 }): string {
-  // Strip UI properties from layers before hashing
   const layersForHash = Array.isArray(componentData.layers)
     ? stripUIProperties(componentData.layers as Layer[])
     : componentData.layers;
+
+  // Hash every variant's layer tree, not just the primary one. Without this,
+  // editing only a non-primary variant leaves the hash unchanged and the
+  // component is never picked up by `getUnpublishedComponents`.
+  const variantsForHash = Array.isArray(componentData.variants)
+    ? componentData.variants.map(v => ({
+      id: v.id,
+      name: v.name,
+      layers: Array.isArray(v.layers) ? stripUIProperties(v.layers as Layer[]) : v.layers,
+    }))
+    : undefined;
 
   return generateContentHash({
     name: componentData.name,
     layers: layersForHash,
     variables: componentData.variables,
+    variants: variantsForHash,
   });
 }
 
