@@ -130,6 +130,23 @@ export interface RichTextEditorHandle {
 export type { FieldVariable } from '@/types';
 
 /**
+ * Rename legacy `image` nodes to `richTextImage` so migrated docs render in the
+ * editor. The new schema only registers `richTextImage`; unknown node types are
+ * silently dropped on load.
+ */
+function normalizeLegacyTiptapDoc<T>(doc: T): T {
+  if (!doc || typeof doc !== 'object') return doc;
+  const node = doc as any;
+  if (node.type === 'image') {
+    node.type = 'richTextImage';
+  }
+  if (Array.isArray(node.content)) {
+    node.content.forEach((child: any) => normalizeLegacyTiptapDoc(child));
+  }
+  return doc;
+}
+
+/**
  * DynamicVariable with React node view for the sidebar rich-text editor.
  * Extends the shared extension with a Badge-based node view.
  */
@@ -522,12 +539,12 @@ const RichTextEditor = forwardRef<RichTextEditorHandle, RichTextEditorProps>(({
       if (withFormatting) {
         // For formatting mode, expect TipTap JSON
         if (typeof value === 'object' && value !== null) {
-          return value;
+          return normalizeLegacyTiptapDoc(value);
         }
         // Try to parse JSON string (in case DB returned stringified JSON)
         if (typeof value === 'string' && value.startsWith('{')) {
           try {
-            return JSON.parse(value);
+            return normalizeLegacyTiptapDoc(JSON.parse(value));
           } catch {
             // Not valid JSON, fall through
           }
