@@ -13,16 +13,11 @@ import {
   getTiptapTextContent,
   buildTiptapDoc,
   applyDesignToLayer,
-  ELEMENT_TEMPLATES,
 } from '@/lib/mcp/utils';
 import type { RichTextBlock } from '@/lib/mcp/utils';
 import { layerToExportHtml } from '@/lib/html-layer-converter';
 import { broadcastLayersChanged } from '@/lib/mcp/broadcast';
-import { designSchema } from './shared-schemas';
-
-const templateEnum = z.enum(
-  Object.keys(ELEMENT_TEMPLATES) as [string, ...string[]],
-);
+import { designSchema, richTextBlockSchema, templateEnum } from './shared-schemas';
 
 async function getPageLayers(pageId: string): Promise<Layer[]> {
   const pageLayers = await getDraftLayers(pageId);
@@ -68,24 +63,8 @@ NESTING RULES:
       position: z.number().optional().describe('Index within parent children. Omit to append at end.'),
       template: templateEnum.describe('Element template to create'),
       text_content: z.string().optional().describe('For text/heading/button/richText: plain display text'),
-      rich_content: z.array(z.object({
-        type: z.enum([
-          'paragraph', 'heading', 'blockquote',
-          'bulletList', 'orderedList',
-          'codeBlock', 'horizontalRule',
-          'htmlEmbed', 'image', 'table', 'component',
-        ]),
-        text: z.string().optional().describe('Text content. Supports **bold**, *italic*, [link](url).'),
-        level: z.number().optional().describe('Heading level 1-6 (for heading type)'),
-        items: z.array(z.string()).optional().describe('List items (for bulletList/orderedList)'),
-        code: z.string().optional().describe('For htmlEmbed: the HTML/JS code to embed'),
-        src: z.string().optional().describe('For image: external image URL (use asset_id for uploaded assets)'),
-        alt: z.string().optional().describe('For image: alt text'),
-        asset_id: z.string().optional().describe('For image: asset ID from upload_asset'),
-        rows: z.array(z.array(z.string())).optional().describe('For table: 2D array of cell text'),
-        header_row: z.boolean().optional().describe('For table: whether the first row renders as headers. Defaults true.'),
-        component_id: z.string().optional().describe('For component: ID of the component to embed'),
-      })).optional().describe('For richText: structured content blocks. Overrides text_content.'),
+      rich_content: z.array(richTextBlockSchema).optional()
+        .describe('For richText: structured content blocks. Overrides text_content.'),
       custom_name: z.string().optional().describe('Custom display name for the layer'),
     },
     async ({ page_id, parent_layer_id, position, template, text_content, rich_content, custom_name }) => {
@@ -346,22 +325,27 @@ For gradient text: also set backgroundClip: "text" and color to "transparent".`,
 
 LINK TYPES:
 - url: External URL (e.g. "https://example.com")
-- page: Link to another page in the site
+- page: Link to another page in the site. Pass collection_item_id alongside page_id_target to link to a specific dynamic-page item.
 - email: Mailto link
 - phone: Tel link
-- asset: Download link to an asset`,
+- asset: Download link to an asset
+- anchor: Set anchor_layer_id (and optionally page_id_target) to jump to a specific layer on the same or another page.`,
     {
       page_id: z.string().describe('The page ID'),
       layer_id: z.string().describe('The layer ID'),
       link_type: z.enum(['url', 'email', 'phone', 'asset', 'page']).describe('Type of link'),
       url: z.string().optional().describe('For url type: the target URL'),
       page_id_target: z.string().optional().describe('For page type: the target page ID'),
+      collection_item_id: z.string().optional().describe('For dynamic page links: the specific collection item the link should resolve to. Omit to use the current item at runtime.'),
       email: z.string().optional().describe('For email type: the email address'),
       phone: z.string().optional().describe('For phone type: the phone number'),
       asset_id: z.string().optional().describe('For asset type: the asset ID to download'),
-      target: z.enum(['_blank', '_self']).optional().describe('Link target. _blank opens new tab.'),
+      anchor_layer_id: z.string().optional().describe('Layer ID to scroll to as an in-page anchor. Combine with link_type "url" to link to "#layer" on the same page, or with link_type "page" to link to "#layer" on another page.'),
+      target: z.enum(['_blank', '_self', '_parent', '_top']).optional().describe('Link target. _blank opens new tab.'),
+      rel: z.string().optional().describe('rel attribute, e.g. "noopener noreferrer", "nofollow", "sponsored", "ugc"'),
+      download: z.boolean().optional().describe('When true, instruct the browser to download the linked resource instead of navigating.'),
     },
-    async ({ page_id, layer_id, link_type, url, page_id_target, email, phone, asset_id, target }) => {
+    async ({ page_id, layer_id, link_type, url, page_id_target, collection_item_id, email, phone, asset_id, anchor_layer_id, target, rel, download }) => {
       const layers = await getPageLayers(page_id);
       const layer = findLayerById(layers, layer_id);
       if (!layer) {
@@ -373,8 +357,15 @@ LINK TYPES:
       if (link_type === 'email' && email) link.email = { type: 'dynamic_text', data: { content: email } };
       if (link_type === 'phone' && phone) link.phone = { type: 'dynamic_text', data: { content: phone } };
       if (link_type === 'asset' && asset_id) link.asset = { id: asset_id };
-      if (link_type === 'page' && page_id_target) link.page = { id: page_id_target };
+      if (link_type === 'page' && page_id_target) {
+        link.page = collection_item_id
+          ? { id: page_id_target, collection_item_id }
+          : { id: page_id_target };
+      }
+      if (anchor_layer_id) link.anchor_layer_id = anchor_layer_id;
       if (target) link.target = target;
+      if (rel !== undefined) link.rel = rel;
+      if (download !== undefined) link.download = download;
 
       const updated = updateLayerById(layers, layer_id, (l) => ({
         ...l,

@@ -1,5 +1,40 @@
 import { z } from 'zod';
 
+import type { DesignProperties } from '@/types';
+import { ELEMENT_TEMPLATES } from '@/lib/mcp/utils';
+
+/**
+ * Enum of every element template key the MCP can create. Derived from
+ * ELEMENT_TEMPLATES so the three add-layer surfaces (single, batch,
+ * component) cannot drift apart when a new template is added.
+ */
+export const templateEnum = z.enum(
+  Object.keys(ELEMENT_TEMPLATES) as [string, ...string[]],
+);
+
+/**
+ * Structured rich-text block accepted by add_layer (rich_content) and the
+ * batch set_rich_text operation. Mirrors the RichTextBlock type in utils.ts.
+ */
+export const richTextBlockSchema = z.object({
+  type: z.enum([
+    'paragraph', 'heading', 'blockquote',
+    'bulletList', 'orderedList',
+    'codeBlock', 'horizontalRule',
+    'htmlEmbed', 'image', 'table', 'component',
+  ]),
+  text: z.string().optional().describe('Text content. Supports **bold**, *italic*, [link](url).'),
+  level: z.number().optional().describe('Heading level 1-6 (for heading type)'),
+  items: z.array(z.string()).optional().describe('List items (for bulletList/orderedList)'),
+  code: z.string().optional().describe('For htmlEmbed: the HTML/JS code to embed'),
+  src: z.string().optional().describe('For image: external image URL (use asset_id for uploaded assets)'),
+  alt: z.string().optional().describe('For image: alt text'),
+  asset_id: z.string().optional().describe('For image: asset ID from upload_asset'),
+  rows: z.array(z.array(z.string())).optional().describe('For table: 2D array of cell text. Inline marks (**bold** etc.) work in each cell.'),
+  header_row: z.boolean().optional().describe('For table: whether the first row should render as table headers. Defaults true.'),
+  component_id: z.string().optional().describe('For component: ID of the component to embed'),
+});
+
 export const designSchema = z.object({
   layout: z.object({
     isActive: z.boolean().optional(),
@@ -25,7 +60,13 @@ export const designSchema = z.object({
     textAlign: z.string().optional(),
     textTransform: z.string().optional(),
     textDecoration: z.string().optional(),
+    textDecorationColor: z.string().optional(),
+    textDecorationThickness: z.string().optional(),
+    underlineOffset: z.string().optional(),
+    lineClamp: z.string().optional().describe('Truncate text after N lines, e.g. "2" or "line-clamp-3"'),
+    verticalAlign: z.string().optional(),
     color: z.string().optional(),
+    placeholderColor: z.string().optional(),
   }).optional(),
   spacing: z.object({
     isActive: z.boolean().optional(),
@@ -48,12 +89,19 @@ export const designSchema = z.object({
     minHeight: z.string().optional(),
     maxWidth: z.string().optional(),
     maxHeight: z.string().optional(),
-    aspectRatio: z.string().optional(),
-    objectFit: z.string().optional(),
+    overflow: z.string().optional().describe('visible | hidden | scroll | auto'),
+    aspectRatio: z.string().nullable().optional(),
+    objectFit: z.string().nullable().optional(),
+    gridColumnSpan: z.string().nullable().optional().describe('Grid column span, e.g. "2" or "span 3"'),
+    gridRowSpan: z.string().nullable().optional().describe('Grid row span, e.g. "2" or "span 3"'),
   }).optional(),
   borders: z.object({
     isActive: z.boolean().optional(),
     borderWidth: z.string().optional(),
+    borderTopWidth: z.string().optional(),
+    borderRightWidth: z.string().optional(),
+    borderBottomWidth: z.string().optional(),
+    borderLeftWidth: z.string().optional(),
     borderStyle: z.string().optional(),
     borderColor: z.string().optional(),
     borderRadius: z.string().optional(),
@@ -61,14 +109,24 @@ export const designSchema = z.object({
     borderTopRightRadius: z.string().optional(),
     borderBottomLeftRadius: z.string().optional(),
     borderBottomRightRadius: z.string().optional(),
+    divideX: z.string().optional().describe('Horizontal divider width between children, e.g. "1px"'),
+    divideY: z.string().optional().describe('Vertical divider width between children, e.g. "1px"'),
+    divideStyle: z.string().optional(),
+    divideColor: z.string().optional(),
+    outlineWidth: z.string().optional(),
+    outlineColor: z.string().optional(),
+    outlineOffset: z.string().optional(),
   }).optional(),
   backgrounds: z.object({
     isActive: z.boolean().optional(),
     backgroundColor: z.string().optional(),
+    backgroundImage: z.string().optional().describe('CSS background-image value, e.g. "url(...)" or var reference'),
     backgroundSize: z.string().optional(),
     backgroundPosition: z.string().optional(),
     backgroundRepeat: z.string().optional(),
     backgroundClip: z.string().optional().describe('"text" for gradient text effect, "border" or "padding"'),
+    bgImageVars: z.record(z.string(), z.string()).optional()
+      .describe('Background image CSS values keyed by var name. Use "--bg-img" for desktop neutral.'),
     bgGradientVars: z.record(z.string(), z.string()).optional()
       .describe('Gradient CSS values keyed by var name. Use "--bg-img" for desktop neutral. Value is a CSS gradient like "linear-gradient(135deg, #667eea 0%, #764ba2 100%)"'),
   }).optional(),
@@ -78,6 +136,8 @@ export const designSchema = z.object({
     boxShadow: z.string().optional(),
     blur: z.string().optional(),
     backdropBlur: z.string().optional(),
+    filter: z.string().optional().describe('CSS filter, e.g. "grayscale(1)" or "brightness(0.5)"'),
+    backdropFilter: z.string().optional().describe('CSS backdrop-filter, e.g. "saturate(180%)"'),
   }).optional(),
   positioning: z.object({
     isActive: z.boolean().optional(),
@@ -88,4 +148,64 @@ export const designSchema = z.object({
     left: z.string().optional(),
     zIndex: z.string().optional(),
   }).optional(),
+  transforms: z.object({
+    isActive: z.boolean().optional(),
+    scale: z.string().optional().describe('Uniform scale factor, e.g. "1.1" or "0.95"'),
+    rotate: z.string().optional().describe('Rotation, e.g. "45deg" or "-15deg"'),
+    translateX: z.string().optional(),
+    translateY: z.string().optional(),
+    skewX: z.string().optional(),
+    skewY: z.string().optional(),
+    transformOrigin: z.string().optional().describe('CSS transform-origin, e.g. "center" or "top left"'),
+  }).optional(),
+  transitions: z.object({
+    isActive: z.boolean().optional(),
+    transitionProperty: z.string().optional().describe('e.g. "all", "opacity", "transform, background-color"'),
+    duration: z.string().optional().describe('e.g. "200ms" or "0.3s"'),
+    easing: z.string().optional().describe('e.g. "ease-in-out", "linear", "cubic-bezier(...)"'),
+    delay: z.string().optional().describe('e.g. "100ms"'),
+  }).optional(),
 }).describe('Design properties object. Set isActive: true on any category to apply it.');
+
+// ── Drift guard ─────────────────────────────────────────────────────────────
+//
+// Compile-time assertion that every category and property of `DesignProperties`
+// is mirrored in `designSchema` above. If you add a new field to one of the
+// DesignProperties interfaces in `types/index.ts` and forget to expose it here,
+// this assertion fails to compile and the TypeScript error names every missing
+// `category.property` pair.
+//
+// Fields listed in `IntentionallyUnexposed` are deliberately omitted from MCP
+// because they store builder-only UI state (which mode toggle is shown) rather
+// than CSS that agents should set directly.
+
+type IntentionallyUnexposed = {
+  layout: 'gapMode';
+  spacing: 'marginMode' | 'paddingMode';
+  borders: 'borderWidthMode' | 'borderRadiusMode';
+};
+
+type NonUndefined<T> = Exclude<T, undefined>;
+type CategoryKeys<T> = keyof NonUndefined<T>;
+
+type ExpectedKeys<K extends keyof DesignProperties> = Exclude<
+  CategoryKeys<DesignProperties[K]>,
+  K extends keyof IntentionallyUnexposed ? IntentionallyUnexposed[K] : never
+>;
+
+type SchemaShape = z.infer<typeof designSchema>;
+
+type MissingPerCategory = {
+  [K in keyof DesignProperties]-?: K extends keyof SchemaShape
+    ? Exclude<ExpectedKeys<K>, CategoryKeys<SchemaShape[K]>>
+    : 'CATEGORY_MISSING';
+};
+
+type MissingFields = {
+  [K in keyof MissingPerCategory]: [MissingPerCategory[K]] extends [never]
+    ? never
+    : `${K & string}.${MissingPerCategory[K] & string}`;
+}[keyof MissingPerCategory];
+
+const _designSchemaDriftCheck: [MissingFields] extends [never] ? true : MissingFields = true;
+void _designSchemaDriftCheck;

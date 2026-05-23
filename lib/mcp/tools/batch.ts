@@ -13,34 +13,10 @@ import {
   getTiptapTextContent,
   buildTiptapDoc,
   applyDesignToLayer,
-  ELEMENT_TEMPLATES,
 } from '@/lib/mcp/utils';
 import type { RichTextBlock } from '@/lib/mcp/utils';
 import { broadcastLayersChanged } from '@/lib/mcp/broadcast';
-import { designSchema } from './shared-schemas';
-
-const templateEnum = z.enum(
-  Object.keys(ELEMENT_TEMPLATES) as [string, ...string[]],
-);
-
-const richTextBlockSchema = z.object({
-  type: z.enum([
-    'paragraph', 'heading', 'blockquote',
-    'bulletList', 'orderedList',
-    'codeBlock', 'horizontalRule',
-    'htmlEmbed', 'image', 'table', 'component',
-  ]),
-  text: z.string().optional().describe('Text content. Supports **bold**, *italic*, [link](url).'),
-  level: z.number().optional().describe('Heading level 1-6 (for heading type)'),
-  items: z.array(z.string()).optional().describe('List items (for bulletList/orderedList)'),
-  code: z.string().optional().describe('For htmlEmbed: the HTML/JS code to embed'),
-  src: z.string().optional().describe('For image: external image URL (use asset_id for uploaded assets)'),
-  alt: z.string().optional().describe('For image: alt text'),
-  asset_id: z.string().optional().describe('For image: asset ID from upload_asset'),
-  rows: z.array(z.array(z.string())).optional().describe('For table: 2D array of cell text. Inline marks (**bold** etc.) work in each cell.'),
-  header_row: z.boolean().optional().describe('For table: whether the first row should render as table headers. Defaults true.'),
-  component_id: z.string().optional().describe('For component: ID of the component to embed'),
-});
+import { designSchema, richTextBlockSchema, templateEnum } from './shared-schemas';
 
 const addLayerOp = z.object({
   type: z.literal('add_layer'),

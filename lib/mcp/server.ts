@@ -28,7 +28,7 @@ import { registerSiteResources } from '@/lib/mcp/resources/site';
 
 export function createMcpServer(): McpServer {
   const server = new McpServer(
-    { name: 'ycode', version: '0.4.0' },
+    { name: 'ycode', version: '0.5.0' },
     { instructions: SYSTEM_INSTRUCTIONS },
   );
 
