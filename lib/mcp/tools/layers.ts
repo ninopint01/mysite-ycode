@@ -13,15 +13,11 @@ import {
   getTiptapTextContent,
   buildTiptapDoc,
   applyDesignToLayer,
-  ELEMENT_TEMPLATES,
 } from '@/lib/mcp/utils';
 import type { RichTextBlock } from '@/lib/mcp/utils';
+import { layerToExportHtml } from '@/lib/html-layer-converter';
 import { broadcastLayersChanged } from '@/lib/mcp/broadcast';
-import { designSchema } from './shared-schemas';
-
-const templateEnum = z.enum(
-  Object.keys(ELEMENT_TEMPLATES) as [string, ...string[]],
-);
+import { designSchema, richTextBlockSchema, templateEnum } from './shared-schemas';
 
 async function getPageLayers(pageId: string): Promise<Layer[]> {
   const pageLayers = await getDraftLayers(pageId);
@@ -67,12 +63,8 @@ NESTING RULES:
       position: z.number().optional().describe('Index within parent children. Omit to append at end.'),
       template: templateEnum.describe('Element template to create'),
       text_content: z.string().optional().describe('For text/heading/button/richText: plain display text'),
-      rich_content: z.array(z.object({
-        type: z.enum(['paragraph', 'heading', 'blockquote', 'bulletList', 'orderedList', 'codeBlock', 'horizontalRule']),
-        text: z.string().optional().describe('Text content. Supports **bold**, *italic*, [link](url).'),
-        level: z.number().optional().describe('Heading level 1-6 (for heading type)'),
-        items: z.array(z.string()).optional().describe('List items (for bulletList/orderedList)'),
-      })).optional().describe('For richText: structured content blocks. Overrides text_content.'),
+      rich_content: z.array(richTextBlockSchema).optional()
+        .describe('For richText: structured content blocks. Overrides text_content.'),
       custom_name: z.string().optional().describe('Custom display name for the layer'),
     },
     async ({ page_id, parent_layer_id, position, template, text_content, rich_content, custom_name }) => {
@@ -333,22 +325,27 @@ For gradient text: also set backgroundClip: "text" and color to "transparent".`,
 
 LINK TYPES:
 - url: External URL (e.g. "https://example.com")
-- page: Link to another page in the site
+- page: Link to another page in the site. Pass collection_item_id alongside page_id_target to link to a specific dynamic-page item.
 - email: Mailto link
 - phone: Tel link
-- asset: Download link to an asset`,
+- asset: Download link to an asset
+- anchor: Set anchor_layer_id (and optionally page_id_target) to jump to a specific layer on the same or another page.`,
     {
       page_id: z.string().describe('The page ID'),
       layer_id: z.string().describe('The layer ID'),
       link_type: z.enum(['url', 'email', 'phone', 'asset', 'page']).describe('Type of link'),
       url: z.string().optional().describe('For url type: the target URL'),
       page_id_target: z.string().optional().describe('For page type: the target page ID'),
+      collection_item_id: z.string().optional().describe('For dynamic page links: the specific collection item the link should resolve to. Omit to use the current item at runtime.'),
       email: z.string().optional().describe('For email type: the email address'),
       phone: z.string().optional().describe('For phone type: the phone number'),
       asset_id: z.string().optional().describe('For asset type: the asset ID to download'),
-      target: z.enum(['_blank', '_self']).optional().describe('Link target. _blank opens new tab.'),
+      anchor_layer_id: z.string().optional().describe('Layer ID to scroll to as an in-page anchor. Combine with link_type "url" to link to "#layer" on the same page, or with link_type "page" to link to "#layer" on another page.'),
+      target: z.enum(['_blank', '_self', '_parent', '_top']).optional().describe('Link target. _blank opens new tab.'),
+      rel: z.string().optional().describe('rel attribute, e.g. "noopener noreferrer", "nofollow", "sponsored", "ugc"'),
+      download: z.boolean().optional().describe('When true, instruct the browser to download the linked resource instead of navigating.'),
     },
-    async ({ page_id, layer_id, link_type, url, page_id_target, email, phone, asset_id, target }) => {
+    async ({ page_id, layer_id, link_type, url, page_id_target, collection_item_id, email, phone, asset_id, anchor_layer_id, target, rel, download }) => {
       const layers = await getPageLayers(page_id);
       const layer = findLayerById(layers, layer_id);
       if (!layer) {
@@ -360,8 +357,15 @@ LINK TYPES:
       if (link_type === 'email' && email) link.email = { type: 'dynamic_text', data: { content: email } };
       if (link_type === 'phone' && phone) link.phone = { type: 'dynamic_text', data: { content: phone } };
       if (link_type === 'asset' && asset_id) link.asset = { id: asset_id };
-      if (link_type === 'page' && page_id_target) link.page = { id: page_id_target };
+      if (link_type === 'page' && page_id_target) {
+        link.page = collection_item_id
+          ? { id: page_id_target, collection_item_id }
+          : { id: page_id_target };
+      }
+      if (anchor_layer_id) link.anchor_layer_id = anchor_layer_id;
       if (target) link.target = target;
+      if (rel !== undefined) link.rel = rel;
+      if (download !== undefined) link.download = download;
 
       const updated = updateLayerById(layers, layer_id, (l) => ({
         ...l,
@@ -446,15 +450,22 @@ LINK TYPES:
 
   server.tool(
     'update_layer_settings',
-    `Update layer settings like HTML tag, custom ID, custom attributes, embed code, and slider/lightbox configuration.
+    `Update layer settings like HTML tag, custom ID, custom attributes, embed code, visibility,
+and per-element configuration (slider, lightbox, map, select options, filter, placeholder option).
 
 COMMON USES:
 - Change heading level: tag "h1", "h2", "h3", etc.
 - Set HTML embed code: html_embed_code "<script>..."
 - Add custom attributes: custom_attributes { "data-analytics": "hero" }
 - Set custom HTML ID: html_id "my-section"
+- Hide a layer from the canvas: hidden true
 - Configure slider: slider { autoplay: true, delay: "5", loop: "loop", pagination: true }
-- Configure lightbox: lightbox { thumbnails: true, zoom: true, navigation: true }`,
+- Configure lightbox: lightbox { thumbnails: true, zoom: true, navigation: true }
+- Bind lightbox to a CMS multi-image field: lightbox { files_source: "cms", files_field_id: "<field id>" }
+- Configure map: map { provider: "mapbox", latitude: 40.7128, longitude: -74.006, zoom: 12 }
+- Bind select / checkbox / radio to a CMS collection: options_source { collection_id: "<id>", sort_field_id: "<id>", sort_order: "asc" }
+- Mark a <option> as the placeholder: is_placeholder true
+- Trigger filter element on every change: filter_on_change true`,
     {
       page_id: z.string().describe('The page ID'),
       layer_id: z.string().describe('The layer ID'),
@@ -463,32 +474,69 @@ COMMON USES:
       html_embed_code: z.string().optional().describe('For htmlEmbed layers: the HTML/CSS/JS code to embed'),
       custom_attributes: z.record(z.string(), z.string()).optional().describe('Custom HTML attributes as { name: value } pairs'),
       custom_name: z.string().optional().describe('Display name for the layer in the builder'),
+      hidden: z.boolean().optional().describe('Hide the layer on the canvas (still renders on the published site).'),
+      filter_on_change: z.boolean().optional().describe('For filter layers: trigger filtering on every input change (debounced).'),
+      is_placeholder: z.boolean().optional().describe('For <option> children of <select>: mark this option as the disabled placeholder.'),
       slider: z.object({
         navigation: z.boolean().optional().describe('Show prev/next arrows'),
         pagination: z.boolean().optional().describe('Show pagination bullets'),
-        paginationType: z.enum(['bullets', 'fraction']).optional().describe('Pagination style'),
+        pagination_type: z.enum(['bullets', 'fraction']).optional().describe('Pagination style'),
+        pagination_clickable: z.boolean().optional(),
         autoplay: z.boolean().optional().describe('Auto-advance slides'),
-        pauseOnHover: z.boolean().optional().describe('Pause autoplay on hover'),
+        pause_on_hover: z.boolean().optional().describe('Pause autoplay on hover'),
         delay: z.string().optional().describe('Autoplay delay in seconds (e.g. "3", "5")'),
         loop: z.enum(['none', 'loop', 'rewind']).optional().describe('Loop mode'),
-        animationEffect: z.enum(['slide', 'fade', 'cube', 'coverflow', 'flip', 'cards']).optional(),
+        animation_effect: z.enum(['slide', 'fade', 'cube', 'coverflow', 'flip', 'cards']).optional(),
         duration: z.string().optional().describe('Transition duration in seconds (e.g. "0.5")'),
+        easing: z.string().optional(),
         centered: z.boolean().optional().describe('Center active slide'),
         mousewheel: z.boolean().optional().describe('Navigate with scroll wheel'),
+        touch_events: z.boolean().optional(),
+        slide_to_clicked: z.boolean().optional(),
+        slides_per_group: z.number().optional(),
+        group_slide: z.number().optional(),
       }).optional().describe('Slider settings (only for slider layers)'),
       lightbox: z.object({
+        files_source: z.enum(['files', 'cms']).optional().describe('"files" for a hand-picked list, "cms" to bind to a multi-image CMS field'),
+        files: z.array(z.string()).optional().describe('For files_source "files": array of asset IDs or external URLs'),
+        files_field_id: z.string().nullable().optional().describe('For files_source "cms": the CMS field ID to read images from (must be a multi-asset field on the surrounding collection layer)'),
         thumbnails: z.boolean().optional().describe('Show thumbnails strip'),
         navigation: z.boolean().optional().describe('Show prev/next arrows'),
         pagination: z.boolean().optional().describe('Show pagination'),
         zoom: z.boolean().optional().describe('Enable pinch-to-zoom'),
-        doubleTapZoom: z.boolean().optional().describe('Enable double-tap zoom'),
+        double_tap_zoom: z.boolean().optional().describe('Enable double-tap zoom'),
         mousewheel: z.boolean().optional().describe('Navigate with scroll wheel'),
         overlay: z.enum(['light', 'dark']).optional().describe('Overlay background style'),
-        animationEffect: z.enum(['slide', 'fade', 'cube', 'coverflow', 'flip', 'cards']).optional(),
+        group_id: z.string().optional().describe('Links multiple lightboxes into one shared gallery'),
+        animation_effect: z.enum(['slide', 'fade', 'cube', 'coverflow', 'flip', 'cards']).optional(),
+        easing: z.string().optional(),
         duration: z.string().optional().describe('Transition duration in seconds'),
       }).optional().describe('Lightbox settings (only for lightbox layers)'),
+      map: z.object({
+        provider: z.enum(['mapbox', 'google']).optional(),
+        latitude: z.number().optional(),
+        longitude: z.number().optional(),
+        zoom: z.number().optional(),
+        marker_color: z.string().nullable().optional(),
+        search: z.string().optional().describe('Address / place to geocode (alternative to lat/lng)'),
+        style: z.string().optional().describe('Provider-specific style key. Sets <provider>.style.'),
+        interactive: z.boolean().optional(),
+        scroll_zoom: z.boolean().optional(),
+        show_nav_control: z.boolean().optional(),
+        show_scale_bar: z.boolean().optional(),
+      }).optional().describe('Map settings (only for map layers)'),
+      options_source: z.object({
+        collection_id: z.string().describe('Collection to source options from'),
+        default_item_id: z.string().optional().describe('Item ID to pre-select (for <select>)'),
+        default_item_ids: z.array(z.string()).optional().describe('Item IDs to pre-check (for checkbox groups)'),
+        sort_field_id: z.string().optional().describe('Field ID to sort by (omit for manual order)'),
+        sort_order: z.enum(['asc', 'desc']).optional(),
+      }).nullable().optional().describe('Bind a select / checkbox / radio element to a CMS collection. Pass null to clear.'),
     },
-    async ({ page_id, layer_id, tag, html_id, html_embed_code, custom_attributes, custom_name, slider, lightbox }) => {
+    async ({
+      page_id, layer_id, tag, html_id, html_embed_code, custom_attributes, custom_name,
+      hidden, filter_on_change, is_placeholder, slider, lightbox, map, options_source,
+    }) => {
       const layers = await getPageLayers(page_id);
       const layer = findLayerById(layers, layer_id);
       if (!layer) {
@@ -499,10 +547,85 @@ COMMON USES:
         const settings = { ...l.settings };
         if (tag) settings.tag = tag;
         if (html_id) settings.id = html_id;
+        if (hidden !== undefined) settings.hidden = hidden;
+        if (filter_on_change !== undefined) settings.filterOnChange = filter_on_change;
+        if (is_placeholder !== undefined) settings.isPlaceholder = is_placeholder;
         if (custom_attributes) settings.customAttributes = { ...settings.customAttributes, ...custom_attributes };
         if (html_embed_code !== undefined) settings.htmlEmbed = { ...settings.htmlEmbed, code: html_embed_code };
-        if (slider && settings.slider) settings.slider = { ...settings.slider, ...slider };
-        if (lightbox && settings.lightbox) settings.lightbox = { ...settings.lightbox, ...lightbox };
+        if (slider) {
+          const existing = settings.slider || {} as Record<string, unknown>;
+          settings.slider = {
+            ...existing,
+            ...(slider.navigation !== undefined && { navigation: slider.navigation }),
+            ...(slider.pagination !== undefined && { pagination: slider.pagination }),
+            ...(slider.pagination_type !== undefined && { paginationType: slider.pagination_type }),
+            ...(slider.pagination_clickable !== undefined && { paginationClickable: slider.pagination_clickable }),
+            ...(slider.autoplay !== undefined && { autoplay: slider.autoplay }),
+            ...(slider.pause_on_hover !== undefined && { pauseOnHover: slider.pause_on_hover }),
+            ...(slider.delay !== undefined && { delay: slider.delay }),
+            ...(slider.loop !== undefined && { loop: slider.loop }),
+            ...(slider.animation_effect !== undefined && { animationEffect: slider.animation_effect }),
+            ...(slider.duration !== undefined && { duration: slider.duration }),
+            ...(slider.easing !== undefined && { easing: slider.easing }),
+            ...(slider.centered !== undefined && { centered: slider.centered }),
+            ...(slider.mousewheel !== undefined && { mousewheel: slider.mousewheel }),
+            ...(slider.touch_events !== undefined && { touchEvents: slider.touch_events }),
+            ...(slider.slide_to_clicked !== undefined && { slideToClicked: slider.slide_to_clicked }),
+            ...(slider.slides_per_group !== undefined && { slidesPerGroup: slider.slides_per_group }),
+            ...(slider.group_slide !== undefined && { groupSlide: slider.group_slide }),
+          } as typeof settings.slider;
+        }
+        if (lightbox) {
+          const existing = (settings.lightbox || {}) as Record<string, unknown>;
+          const next = { ...existing } as Record<string, unknown>;
+          if (lightbox.files_source !== undefined) next.filesSource = lightbox.files_source;
+          if (lightbox.files !== undefined) next.files = lightbox.files;
+          if (lightbox.files_field_id !== undefined) {
+            next.filesField = lightbox.files_field_id
+              ? { type: 'field', data: { field_id: lightbox.files_field_id, field_type: 'image', relationships: [] } }
+              : null;
+          }
+          if (lightbox.thumbnails !== undefined) next.thumbnails = lightbox.thumbnails;
+          if (lightbox.navigation !== undefined) next.navigation = lightbox.navigation;
+          if (lightbox.pagination !== undefined) next.pagination = lightbox.pagination;
+          if (lightbox.zoom !== undefined) next.zoom = lightbox.zoom;
+          if (lightbox.double_tap_zoom !== undefined) next.doubleTapZoom = lightbox.double_tap_zoom;
+          if (lightbox.mousewheel !== undefined) next.mousewheel = lightbox.mousewheel;
+          if (lightbox.overlay !== undefined) next.overlay = lightbox.overlay;
+          if (lightbox.group_id !== undefined) next.groupId = lightbox.group_id;
+          if (lightbox.animation_effect !== undefined) next.animationEffect = lightbox.animation_effect;
+          if (lightbox.easing !== undefined) next.easing = lightbox.easing;
+          if (lightbox.duration !== undefined) next.duration = lightbox.duration;
+          settings.lightbox = next as unknown as typeof settings.lightbox;
+        }
+        if (map) {
+          const existing = (settings.map || {}) as Record<string, unknown>;
+          const next = { ...existing } as Record<string, unknown>;
+          if (map.provider !== undefined) next.provider = map.provider;
+          if (map.latitude !== undefined) next.latitude = map.latitude;
+          if (map.longitude !== undefined) next.longitude = map.longitude;
+          if (map.zoom !== undefined) next.zoom = map.zoom;
+          if (map.marker_color !== undefined) next.markerColor = map.marker_color;
+          if (map.search !== undefined) next.search = map.search;
+          const providerKey = (map.provider || existing.provider || 'mapbox') as 'mapbox' | 'google';
+          const providerSettings = { ...((existing[providerKey] as Record<string, unknown>) || {}) };
+          if (map.style !== undefined) providerSettings.style = map.style;
+          if (map.interactive !== undefined) providerSettings.interactive = map.interactive;
+          if (map.scroll_zoom !== undefined) providerSettings.scrollZoom = map.scroll_zoom;
+          if (map.show_nav_control !== undefined) providerSettings.showNavControl = map.show_nav_control;
+          if (map.show_scale_bar !== undefined) providerSettings.showScaleBar = map.show_scale_bar;
+          if (Object.keys(providerSettings).length > 0) next[providerKey] = providerSettings;
+          settings.map = next as unknown as typeof settings.map;
+        }
+        if (options_source !== undefined) {
+          settings.optionsSource = options_source === null ? undefined : {
+            collectionId: options_source.collection_id,
+            ...(options_source.default_item_id !== undefined && { defaultItemId: options_source.default_item_id }),
+            ...(options_source.default_item_ids !== undefined && { defaultItemIds: options_source.default_item_ids }),
+            ...(options_source.sort_field_id !== undefined && { sortFieldId: options_source.sort_field_id }),
+            ...(options_source.sort_order !== undefined && { sortOrder: options_source.sort_order }),
+          };
+        }
 
         return {
           ...l,
@@ -513,6 +636,70 @@ COMMON USES:
 
       await savePageLayers(page_id, updated);
       return { content: [{ type: 'text' as const, text: `Updated settings for "${layer.customName || layer.name}"` }] };
+    },
+  );
+
+  server.tool(
+    'update_form_settings',
+    `Configure how a form layer handles submissions.
+
+success_action: "message" (default) shows the form's alert child; "redirect" sends the visitor to redirect_url.
+email_notification: when enabled, each submission emails the configured address. Requires SMTP set up in site settings.
+redirect_url: used when success_action is "redirect". Accepts an internal path "/thank-you" or an external URL.`,
+    {
+      page_id: z.string().describe('The page ID'),
+      layer_id: z.string().describe('The form layer ID'),
+      success_action: z.enum(['message', 'redirect']).optional(),
+      redirect_url: z.string().optional()
+        .describe('For success_action "redirect": the URL to send the user to.'),
+      email_notification: z.object({
+        enabled: z.boolean(),
+        to: z.string().describe('Email address that receives a notification on each submission'),
+        subject: z.string().optional().describe('Subject line of the notification email'),
+      }).optional(),
+    },
+    async ({ page_id, layer_id, success_action, redirect_url, email_notification }) => {
+      const layers = await getPageLayers(page_id);
+      const layer = findLayerById(layers, layer_id);
+      if (!layer) {
+        return { content: [{ type: 'text' as const, text: `Error: Layer "${layer_id}" not found.` }], isError: true };
+      }
+
+      const updated = updateLayerById(layers, layer_id, (l) => {
+        const settings = { ...l.settings };
+        const existingForm = (settings.form || {}) as Record<string, unknown>;
+        const nextForm: Record<string, unknown> = { ...existingForm };
+        if (success_action !== undefined) nextForm.success_action = success_action;
+        if (email_notification !== undefined) nextForm.email_notification = email_notification;
+        if (redirect_url !== undefined) {
+          nextForm.redirect_url = { type: 'dynamic_text', data: { content: redirect_url } };
+        }
+        settings.form = nextForm as typeof settings.form;
+        return { ...l, settings };
+      });
+
+      await savePageLayers(page_id, updated);
+      return { content: [{ type: 'text' as const, text: `Updated form settings for "${layer.customName || layer.name}"` }] };
+    },
+  );
+
+  server.tool(
+    'export_layer_html',
+    `Render a layer (and its descendants) to a self-contained HTML string with Tailwind
+classes preserved. Useful for copying a section, sharing markup, or seeding another
+page via the HTML import flow.`,
+    {
+      page_id: z.string().describe('The page ID'),
+      layer_id: z.string().describe('The layer ID to export'),
+    },
+    async ({ page_id, layer_id }) => {
+      const layers = await getPageLayers(page_id);
+      const layer = findLayerById(layers, layer_id);
+      if (!layer) {
+        return { content: [{ type: 'text' as const, text: `Error: Layer "${layer_id}" not found.` }], isError: true };
+      }
+      const html = layerToExportHtml(layer);
+      return { content: [{ type: 'text' as const, text: html }] };
     },
   );
 

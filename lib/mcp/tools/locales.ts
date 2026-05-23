@@ -14,6 +14,15 @@ import {
   deleteTranslation,
   upsertTranslations,
 } from '@/lib/repositories/translationRepository';
+import { buildTiptapDoc } from '@/lib/mcp/utils';
+import type { RichTextBlock } from '@/lib/mcp/utils';
+
+const richTextBlockSchema = z.object({
+  type: z.enum(['paragraph', 'heading', 'blockquote', 'bulletList', 'orderedList', 'codeBlock', 'horizontalRule']),
+  text: z.string().optional().describe('Text content. Supports **bold**, *italic*, [link](url).'),
+  level: z.number().optional().describe('Heading level 1-6 (for heading type)'),
+  items: z.array(z.string()).optional().describe('List items (for bulletList/orderedList)'),
+});
 
 export function registerLocaleTools(server: McpServer) {
   server.tool(
@@ -232,6 +241,43 @@ export function registerLocaleTools(server: McpServer) {
       await deleteTranslation(translation_id);
       return {
         content: [{ type: 'text' as const, text: `Translation ${translation_id} deleted successfully.` }],
+      };
+    },
+  );
+
+  server.tool(
+    'set_rich_text_translation',
+    `Translate a rich-text content key by passing structured blocks. The blocks are converted
+to the Tiptap JSON shape that Ycode expects for richtext translations and stored as
+content_value. Equivalent to calling set_translation with content_type "richtext" but the
+agent doesn't have to assemble the JSON by hand.
+
+Block types match add_layer's rich_content: paragraph, heading, blockquote, bulletList,
+orderedList, codeBlock, horizontalRule. Text supports **bold**, *italic*, [link](url).`,
+    {
+      locale_id: z.string().describe('The locale ID'),
+      source_type: z.enum(['page', 'folder', 'component', 'cms']).describe('Type of source being translated'),
+      source_id: z.string().describe('ID of the source (page ID, component ID, etc.)'),
+      content_key: z.string().describe('Content key identifying the rich-text field (e.g. layer ID or "richtext:<field id>")'),
+      blocks: z.array(richTextBlockSchema).min(1).describe('Rich-text blocks describing the translated content'),
+      is_completed: z.boolean().optional().describe('Mark translation as complete. Defaults to false.'),
+    },
+    async ({ locale_id, source_type, source_id, content_key, blocks, is_completed }) => {
+      const doc = buildTiptapDoc(blocks as RichTextBlock[]);
+      const translation = await createTranslation({
+        locale_id,
+        source_type,
+        source_id,
+        content_key,
+        content_type: 'richtext',
+        content_value: JSON.stringify(doc),
+        is_completed,
+      });
+      return {
+        content: [{
+          type: 'text' as const,
+          text: JSON.stringify({ message: 'Rich-text translation saved', translation }, null, 2),
+        }],
       };
     },
   );

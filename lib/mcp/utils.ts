@@ -131,6 +131,10 @@ export function getTiptapTextContent(text: string): TiptapDoc {
  *  - { type: "orderedList", items: ["...", "..."] }
  *  - { type: "codeBlock", text: "..." }
  *  - { type: "horizontalRule" }
+ *  - { type: "htmlEmbed", code: "<script>...</script>" }
+ *  - { type: "image", src: "...", alt?: "...", asset_id?: "..." }
+ *  - { type: "table", rows: [["cell", "cell"], ...], header_row: true }
+ *  - { type: "component", component_id: "..." }
  *
  * Text can include simple inline formatting via markdown-like syntax:
  *  - **bold**, *italic*, [link text](url)
@@ -143,10 +147,21 @@ export function buildTiptapDoc(blocks: RichTextBlock[]): TiptapDoc {
 }
 
 export interface RichTextBlock {
-  type: 'paragraph' | 'heading' | 'blockquote' | 'bulletList' | 'orderedList' | 'codeBlock' | 'horizontalRule';
+  type:
+    | 'paragraph' | 'heading' | 'blockquote'
+    | 'bulletList' | 'orderedList'
+    | 'codeBlock' | 'horizontalRule'
+    | 'htmlEmbed' | 'image' | 'table' | 'component';
   text?: string;
   level?: number;
   items?: string[];
+  code?: string;
+  src?: string;
+  alt?: string;
+  asset_id?: string;
+  rows?: string[][];
+  header_row?: boolean;
+  component_id?: string;
 }
 
 function parseInlineMarks(text: string): TiptapNode[] {
@@ -224,12 +239,48 @@ function blockToTiptapNode(block: RichTextBlock): TiptapNode {
       };
     case 'horizontalRule':
       return { type: 'horizontalRule' };
+    case 'htmlEmbed':
+      return {
+        type: 'richTextHtmlEmbed',
+        attrs: { code: block.code || '' },
+      };
+    case 'image':
+      return {
+        type: 'richTextImage',
+        attrs: {
+          src: block.src || '',
+          alt: block.alt || null,
+          assetId: block.asset_id || null,
+          link: null,
+        },
+      };
+    case 'component':
+      return {
+        type: 'richTextComponent',
+        attrs: { componentId: block.component_id || '' },
+      };
+    case 'table':
+      return buildTableNode(block.rows || [], block.header_row !== false);
     default:
       return {
         type: 'paragraph',
         content: block.text ? [{ type: 'text', text: block.text }] : [],
       };
   }
+}
+
+function buildTableNode(rows: string[][], headerRow: boolean): TiptapNode {
+  if (rows.length === 0) return { type: 'paragraph' };
+  return {
+    type: 'table',
+    content: rows.map((row, rowIdx) => ({
+      type: 'tableRow',
+      content: row.map((cellText) => ({
+        type: headerRow && rowIdx === 0 ? 'tableHeader' : 'tableCell',
+        content: [{ type: 'paragraph', content: cellText ? parseInlineMarks(cellText) : [] }],
+      })),
+    })),
+  };
 }
 
 /**
@@ -666,6 +717,36 @@ export const ELEMENT_TEMPLATES: Record<string, ElementTemplateEntry> = {
   localeSelector: {
     name: 'Locale Selector',
     description: 'Language switcher dropdown for multi-language sites.',
+    useBlocksTemplate: true,
+  },
+  table: {
+    name: 'Table',
+    description: 'Data table (renders as <table>). Pre-populated with a header row and two body rows.',
+    useBlocksTemplate: true,
+  },
+  thead: {
+    name: 'Table Header',
+    description: '<thead> with one header row. Add inside a table.',
+    useBlocksTemplate: true,
+  },
+  tbody: {
+    name: 'Table Body',
+    description: '<tbody> with one row. Add inside a table.',
+    useBlocksTemplate: true,
+  },
+  tr: {
+    name: 'Table Row',
+    description: '<tr>. Add inside thead or tbody.',
+    useBlocksTemplate: true,
+  },
+  td: {
+    name: 'Table Cell',
+    description: '<td>. Add inside a tr.',
+    useBlocksTemplate: true,
+  },
+  th: {
+    name: 'Table Header Cell',
+    description: '<th>. Add inside a thead tr.',
     useBlocksTemplate: true,
   },
 };

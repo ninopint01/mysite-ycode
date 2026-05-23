@@ -13,22 +13,10 @@ import {
   getTiptapTextContent,
   buildTiptapDoc,
   applyDesignToLayer,
-  ELEMENT_TEMPLATES,
 } from '@/lib/mcp/utils';
 import type { RichTextBlock } from '@/lib/mcp/utils';
 import { broadcastLayersChanged } from '@/lib/mcp/broadcast';
-import { designSchema } from './shared-schemas';
-
-const templateEnum = z.enum(
-  Object.keys(ELEMENT_TEMPLATES) as [string, ...string[]],
-);
-
-const richTextBlockSchema = z.object({
-  type: z.enum(['paragraph', 'heading', 'blockquote', 'bulletList', 'orderedList', 'codeBlock', 'horizontalRule']),
-  text: z.string().optional(),
-  level: z.number().optional(),
-  items: z.array(z.string()).optional(),
-});
+import { designSchema, richTextBlockSchema, templateEnum } from './shared-schemas';
 
 const addLayerOp = z.object({
   type: z.literal('add_layer'),
