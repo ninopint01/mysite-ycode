@@ -314,6 +314,10 @@ function buildTimeline(interaction: LayerInteraction): gsap.core.Timeline | null
 export default function AnimationInitializer({ layers, injectInitialCSS }: AnimationInitializerProps) {
   const cleanupRef = useRef<(() => void)[]>([]);
   const timelinesRef = useRef<Map<string, gsap.core.Timeline>>(new Map());
+  // ScrollTriggers for one-shot `scroll-into-view` intros, keyed by
+  // interaction id. Tracked separately so effect re-runs can detach a played
+  // trigger without killing its in-flight timeline (see detachAnimations).
+  const scrollTriggersRef = useRef<Map<string, ScrollTrigger>>(new Map());
   const prevBreakpointRef = useRef<Breakpoint | null>(null);
   const [currentBreakpoint, setCurrentBreakpoint] = useState<Breakpoint>(() => getCurrentBreakpoint());
   const styleRef = useRef<HTMLStyleElement | null>(null);
@@ -440,11 +444,34 @@ export default function AnimationInitializer({ layers, injectInitialCSS }: Anima
     // Update previous breakpoint reference
     prevBreakpointRef.current = currentBreakpoint;
 
-    // Clean up previous animations
+    // Detach animations from the previous run. One-shot intros (load,
+    // scroll-into-view) that have already played keep their timeline so
+    // effect re-runs (filter/load-more state changes, Suspense resolution)
+    // don't freeze a mid-flight animation. The early break in the
+    // per-trigger switch below avoids rebuilding their timelines/triggers.
+    //
+    // `scrollTrigger.kill()` defaults to also killing its linked timeline,
+    // so a played trigger must be detached with `kill(false, true)` to keep
+    // the animation running. Defined as a closure so the unmount/return
+    // cleanup can reuse it.
+    const detachAnimations = () => {
+      const playedIds = playedOneShotInteractionsRef.current;
+      scrollTriggersRef.current.forEach((st, interactionId) => {
+        // allowAnimation = played → don't kill the in-flight timeline.
+        st.kill(false, playedIds.has(interactionId));
+        scrollTriggersRef.current.delete(interactionId);
+      });
+      timelinesRef.current.forEach((tl, interactionId) => {
+        if (!playedIds.has(interactionId)) {
+          tl.kill();
+          timelinesRef.current.delete(interactionId);
+        }
+      });
+    };
+
     cleanupRef.current.forEach((cleanup) => cleanup());
     cleanupRef.current = [];
-    timelinesRef.current.forEach((tl) => tl.kill());
-    timelinesRef.current.clear();
+    detachAnimations();
 
     collectedInteractions.forEach(({ triggerLayerId, interaction }) => {
       const triggerElement = getElement(triggerLayerId);
@@ -568,7 +595,9 @@ export default function AnimationInitializer({ layers, injectInitialCSS }: Anima
             },
           });
 
-          cleanupRef.current.push(() => scrollTrigger.kill());
+          // Tracked in scrollTriggersRef (not cleanupRef) so a played trigger
+          // can be detached on re-run without killing its in-flight timeline.
+          scrollTriggersRef.current.set(interaction.id, scrollTrigger);
           break;
         }
 
@@ -646,13 +675,16 @@ export default function AnimationInitializer({ layers, injectInitialCSS }: Anima
 
     // Capture ref values for cleanup
     const cleanups = cleanupRef.current;
-    const timelines = timelinesRef.current;
 
     return () => {
       if (rebindTimer) clearTimeout(rebindTimer);
       remountObserver.disconnect();
       cleanups.forEach((cleanup) => cleanup());
-      timelines.forEach((tl) => tl.kill());
+      // Detach played one-shots without killing their timeline (see note at
+      // top of effect), then sweep any remaining triggers. Preserved
+      // timelines have already been unlinked via kill(false, true), so the
+      // sweep below can't touch them.
+      detachAnimations();
       ScrollTrigger.getAll().forEach((st) => st.kill());
     };
   }, [effectiveLayers, currentBreakpoint, rebindTick]);
