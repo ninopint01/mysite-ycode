@@ -520,10 +520,35 @@ Example: \`search_google_fonts({ query: "playfair" })\` → \`add_font({ family:
 Multi-language support:
 - Use list_locales to see configured languages
 - Use create_locale with ISO 639-1 code (e.g. "fr", "de", "ja")
+- Use list_translatable_content FIRST to discover exactly what can be translated for a page/component/cms collection — it returns the precise source_type/source_id/content_key/content_type plus the current source value (and existing translation when locale_id is passed). Don't guess content keys.
 - Use set_translation to translate plain-text content for a locale
-- Use set_rich_text_translation with structured blocks for richText fields (skips hand-assembling Tiptap JSON)
-- Use batch_set_translations for bulk translations
+- Use set_rich_text_translation with structured blocks for rich_text fields (skips hand-assembling Tiptap JSON)
+- Use batch_set_translations for bulk plain-text translations
 - Each translation targets a source (page/component/cms) + content_key
+
+**IMPORTANT — completion & publishing:**
+- Translations are marked complete by default (\`is_completed: true\`). Only pass \`is_completed: false\` for work-in-progress drafts — incomplete translations are saved but NEVER appear on the live site.
+- Translations are drafts until published. After translating, call \`publish\`. \`get_unpublished_changes\` reports pending translation/locale counts.
+
+**Finding what to translate (content_key formats):**
+- **Pages/components — layer text:** \`content_key = "layer:<layerId>:text"\`. Get layer IDs from get_layers. source_type "page" or "component", source_id = page/component ID.
+- **Page slug / SEO:** \`content_key\` = "slug", "seo:title", or "seo:description". source_type "page".
+- **CMS fields:** source_type "cms", source_id = collection ITEM id. content_key = \`"field:key:<fieldKey>"\` (e.g. "field:key:content", "field:key:title"), or \`"field:id:<fieldId>"\` when the field has no key. Use list_collection_items to get item IDs plus each field's key and type. Only \`text\` and \`rich_text\` fields are translatable.
+- **CMS rich_text fields (e.g. a blog post "content" body):** these store Tiptap JSON, not plain text. Use \`set_rich_text_translation\` with content_key \`"field:key:content"\` (content_type is set to "richtext" automatically). Do NOT send plain text via set_translation for rich_text fields — it will not render and will appear empty in the editor.
+- **Component instance overrides:** when a component instance overrides text/image on a specific page, that override is translated PER PAGE (not on the component). content_key = \`"layer:<instanceLayerId>:override:<type>:<variableId>"\` where type is \`text\`, \`rich_text\`, \`image_src\`, or \`image_alt\`; source_type "page", source_id = page ID. These are easy to miss — call \`list_translatable_content({ source_type: "page", source_id })\` to get them with clear "Component › Variable" labels.
+
+Example — translate a blog post body into Russian:
+\`\`\`
+list_collection_items({ collection_id: "<posts collection>" })
+  → find the item id and the "content" field (type: rich_text, key: "content")
+set_rich_text_translation({
+  locale_id: "<ru locale>", source_type: "cms", source_id: "<item id>",
+  content_key: "field:key:content",
+  blocks: [{ type: "paragraph", text: "Переведённый текст..." }],
+  is_completed: true
+})
+publish()
+\`\`\`
 
 ### Page Folders
 
@@ -554,8 +579,8 @@ Global site configuration:
 ### Publishing
 
 All changes are drafts until published:
-- Use get_unpublished_changes to see what needs publishing (pages, styles, components, collections, fonts, assets)
-- Use publish to make everything live
+- Use get_unpublished_changes to see what needs publishing (pages, styles, components, collections, fonts, assets, translations, locales)
+- Use publish to make everything live (this also publishes locales and translations)
 
 ---
 

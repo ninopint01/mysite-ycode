@@ -353,6 +353,9 @@ export async function upsertTranslations(
     content_key: t.content_key,
     content_type: t.content_type,
     content_value: t.content_value,
+    // Without this, the DB default (false) keeps batch translations hidden on
+    // the live site, which only renders completed translations.
+    is_completed: t.is_completed ?? false,
     is_published: false,
     deleted_at: null, // Restore if previously deleted
   }));

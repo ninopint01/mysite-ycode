@@ -14,8 +14,21 @@ import {
   deleteTranslation,
   upsertTranslations,
 } from '@/lib/repositories/translationRepository';
-import { buildTiptapDoc } from '@/lib/mcp/utils';
+import { getPageById } from '@/lib/repositories/pageRepository';
+import { getAllComponents, getComponentById } from '@/lib/repositories/componentRepository';
+import { getFieldsByCollectionId } from '@/lib/repositories/collectionFieldRepository';
+import { getItemsWithValues } from '@/lib/repositories/collectionItemRepository';
+import { getCachedLayers } from '@/lib/mcp/page-layers';
+import {
+  extractPageTranslatableItems,
+  extractComponentTranslatableItems,
+  extractCmsTranslatableItems,
+} from '@/lib/localisation-utils';
+import type { TranslatableItem } from '@/lib/localisation-utils';
+import { getTranslatableKey } from '@/lib/locale-runtime';
+import { buildTiptapDoc, validateTranslationContent } from '@/lib/mcp/utils';
 import type { RichTextBlock } from '@/lib/mcp/utils';
+import type { ComponentVariant, Layer } from '@/types';
 
 const richTextBlockSchema = z.object({
   type: z.enum(['paragraph', 'heading', 'blockquote', 'bulletList', 'orderedList', 'codeBlock', 'horizontalRule']),
@@ -153,17 +166,22 @@ export function registerLocaleTools(server: McpServer) {
       content_key: z.string().describe('Content key identifying what is being translated (e.g. layer ID or field name)'),
       content_type: z.enum(['text', 'richtext', 'asset_id']).optional().describe('Type of content. Defaults to "text".'),
       content_value: z.string().describe('The translated content'),
-      is_completed: z.boolean().optional().describe('Mark translation as complete. Defaults to false.'),
+      is_completed: z.boolean().optional().describe('Mark translation as complete. Defaults to true. Incomplete translations are saved as drafts but never shown on the live site.'),
     },
     async ({ locale_id, source_type, source_id, content_key, content_type, content_value, is_completed }) => {
+      const resolvedType = content_type || 'text';
+      const validation = validateTranslationContent(resolvedType, content_value);
+      if (!validation.valid) {
+        return { content: [{ type: 'text' as const, text: `Error: ${validation.error}` }], isError: true };
+      }
       const translation = await createTranslation({
         locale_id,
         source_type,
         source_id,
         content_key,
-        content_type: content_type || 'text',
+        content_type: resolvedType,
         content_value,
-        is_completed,
+        is_completed: is_completed ?? true,
       });
       return {
         content: [{
@@ -196,8 +214,25 @@ export function registerLocaleTools(server: McpServer) {
         content_key: t.content_key,
         content_type: (t.content_type || 'text') as 'text' | 'richtext' | 'asset_id',
         content_value: t.content_value,
-        is_completed: t.is_completed,
+        is_completed: t.is_completed ?? true,
       }));
+
+      // Validate every entry up front so a malformed item doesn't partially
+      // apply the batch — report each failure with its index and key.
+      const errors = data
+        .map((t, i) => ({ i, key: t.content_key, result: validateTranslationContent(t.content_type, t.content_value) }))
+        .filter((e) => !e.result.valid)
+        .map((e) => `[${e.i}] "${e.key}": ${(e.result as { error: string }).error}`);
+      if (errors.length > 0) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: `Error: ${errors.length} translation(s) have an invalid format and none were saved. Fix and retry:\n${errors.join('\n')}`,
+          }],
+          isError: true,
+        };
+      }
+
       const result = await upsertTranslations(data);
       return {
         content: [{
@@ -246,6 +281,92 @@ export function registerLocaleTools(server: McpServer) {
   );
 
   server.tool(
+    'list_translatable_content',
+    `Discover exactly what can be translated for a page, component, or CMS collection — and the precise source_type/source_id/content_key/content_type to use with set_translation. Use this BEFORE translating so you never have to guess keys. Pass locale_id to also see which items already have a translation and their current value.`,
+    {
+      source_type: z.enum(['page', 'component', 'cms']).describe('What to inspect: a page, a component, or a CMS collection'),
+      source_id: z.string().describe('Page ID, component ID, or collection ID (for cms)'),
+      locale_id: z.string().optional().describe('Optional locale ID to annotate each item with its existing translation status/value'),
+      search: z.string().optional().describe('CMS only: filter collection items by search term'),
+      limit: z.number().optional().describe('CMS only: max collection items to scan (default 25)'),
+    },
+    async ({ source_type, source_id, locale_id, search, limit }) => {
+      let items: TranslatableItem[] = [];
+      let total: number | undefined;
+
+      if (source_type === 'page') {
+        const page = await getPageById(source_id);
+        if (!page) {
+          return { content: [{ type: 'text' as const, text: `Error: Page "${source_id}" not found.` }], isError: true };
+        }
+        const layers = await getCachedLayers(source_id);
+        // Pass components so per-instance override rows get rich
+        // "Component › Variable" labels instead of falling back to layer names.
+        const components = await getAllComponents(false).catch(() => []);
+        items = extractPageTranslatableItems(page, layers, undefined, components);
+      } else if (source_type === 'component') {
+        const component = await getComponentById(source_id);
+        if (!component) {
+          return { content: [{ type: 'text' as const, text: `Error: Component "${source_id}" not found.` }], isError: true };
+        }
+        const variants = component.variants as ComponentVariant[] | undefined;
+        const layers = (variants?.[0]?.layers || (component.layers as Layer[]) || []);
+        items = extractComponentTranslatableItems({ id: component.id, name: component.name }, layers);
+      } else {
+        const fields = await getFieldsByCollectionId(source_id);
+        const { items: collectionItems, total: itemTotal } = await getItemsWithValues(
+          source_id,
+          false,
+          search ? { search } : undefined,
+        );
+        total = itemTotal;
+        const scoped = collectionItems.slice(0, limit ?? 25);
+        for (const item of scoped) {
+          items.push(...extractCmsTranslatableItems(
+            { id: item.id, collection_id: source_id, values: item.values },
+            fields,
+          ));
+        }
+      }
+
+      // Annotate with existing translations for the given locale, if requested.
+      let existingByKey: Map<string, { value: string; is_completed: boolean }> | null = null;
+      if (locale_id) {
+        const translations = await getTranslationsByLocale(locale_id);
+        existingByKey = new Map(
+          translations.map((t) => [getTranslatableKey(t), { value: t.content_value, is_completed: t.is_completed }]),
+        );
+      }
+
+      const result = items.map((item) => {
+        const existing = existingByKey?.get(item.key);
+        return {
+          source_type: item.source_type,
+          source_id: item.source_id,
+          content_key: item.content_key,
+          content_type: item.content_type,
+          label: item.info?.label,
+          source_value: item.content_value,
+          ...(locale_id
+            ? { has_translation: !!existing, is_completed: existing?.is_completed ?? false, translated_value: existing?.value }
+            : {}),
+        };
+      });
+
+      return {
+        content: [{
+          type: 'text' as const,
+          text: JSON.stringify({
+            count: result.length,
+            ...(total !== undefined ? { collection_items_total: total, scanned_items: Math.min(total, limit ?? 25) } : {}),
+            items: result,
+          }, null, 2),
+        }],
+      };
+    },
+  );
+
+  server.tool(
     'set_rich_text_translation',
     `Translate a rich-text content key by passing structured blocks. The blocks are converted
 to the Tiptap JSON shape that Ycode expects for richtext translations and stored as
@@ -260,7 +381,7 @@ orderedList, codeBlock, horizontalRule. Text supports **bold**, *italic*, [link]
       source_id: z.string().describe('ID of the source (page ID, component ID, etc.)'),
       content_key: z.string().describe('Content key identifying the rich-text field (e.g. layer ID or "richtext:<field id>")'),
       blocks: z.array(richTextBlockSchema).min(1).describe('Rich-text blocks describing the translated content'),
-      is_completed: z.boolean().optional().describe('Mark translation as complete. Defaults to false.'),
+      is_completed: z.boolean().optional().describe('Mark translation as complete. Defaults to true. Incomplete translations are saved as drafts but never shown on the live site.'),
     },
     async ({ locale_id, source_type, source_id, content_key, blocks, is_completed }) => {
       const doc = buildTiptapDoc(blocks as RichTextBlock[]);
@@ -271,7 +392,7 @@ orderedList, codeBlock, horizontalRule. Text supports **bold**, *italic*, [link]
         content_key,
         content_type: 'richtext',
         content_value: JSON.stringify(doc),
-        is_completed,
+        is_completed: is_completed ?? true,
       });
       return {
         content: [{

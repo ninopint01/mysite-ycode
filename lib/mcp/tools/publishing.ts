@@ -7,6 +7,8 @@ import { getItemsByCollectionId } from '@/lib/repositories/collectionItemReposit
 import { getUnpublishedAssets, publishAssets, hardDeleteSoftDeletedAssets } from '@/lib/repositories/assetRepository';
 import { getUnpublishedAssetFolders, publishAssetFolders, hardDeleteSoftDeletedAssetFolders } from '@/lib/repositories/assetFolderRepository';
 import { getUnpublishedFonts, publishFonts } from '@/lib/repositories/fontRepository';
+import { getAllLocales } from '@/lib/repositories/localeRepository';
+import { getUnpublishedTranslationsCount } from '@/lib/repositories/translationRepository';
 import { publishPages } from '@/lib/services/pageService';
 import { publishCollectionWithItems } from '@/lib/services/collectionService';
 import { publishLocalisation } from '@/lib/services/localisationService';
@@ -15,13 +17,23 @@ import { publishCSS, savePublishedAt } from '@/lib/services/settingsService';
 import { generateAndSaveDraftCSS } from '@/lib/server/cssGenerator';
 import { clearAllCache } from '@/lib/services/cacheService';
 
+/** Count draft locales not yet present in the published set (new languages awaiting publish). */
+async function countUnpublishedLocales(): Promise<number> {
+  const [draft, published] = await Promise.all([
+    getAllLocales(false),
+    getAllLocales(true),
+  ]);
+  const publishedIds = new Set(published.map((l) => l.id));
+  return draft.filter((l) => !publishedIds.has(l.id)).length;
+}
+
 export function registerPublishingTools(server: McpServer) {
   server.tool(
     'get_unpublished_changes',
-    'Check what changes are pending and need to be published. Reports unpublished pages, styles, components, collections, fonts, and assets.',
+    'Check what changes are pending and need to be published. Reports unpublished pages, styles, components, collections, fonts, assets, translations, and locales.',
     {},
     async () => {
-      const [pages, styles, components, collections, fonts, assets, assetFolders] = await Promise.all([
+      const [pages, styles, components, collections, fonts, assets, assetFolders, translations, locales] = await Promise.all([
         getUnpublishedPages().catch(() => []),
         getUnpublishedLayerStyles().catch(() => []),
         getUnpublishedComponents().catch(() => []),
@@ -29,10 +41,13 @@ export function registerPublishingTools(server: McpServer) {
         getUnpublishedFonts().catch(() => []),
         getUnpublishedAssets().catch(() => []),
         getUnpublishedAssetFolders().catch(() => []),
+        getUnpublishedTranslationsCount().catch(() => 0),
+        countUnpublishedLocales().catch(() => 0),
       ]);
 
       const hasChanges = pages.length > 0 || styles.length > 0 || components.length > 0
-        || collections.length > 0 || fonts.length > 0 || assets.length > 0 || assetFolders.length > 0;
+        || collections.length > 0 || fonts.length > 0 || assets.length > 0 || assetFolders.length > 0
+        || translations > 0 || locales > 0;
 
       return {
         content: [{
@@ -46,6 +61,8 @@ export function registerPublishingTools(server: McpServer) {
             unpublished_fonts: fonts.map((f) => ({ id: f.id, family: f.family })),
             unpublished_assets: assets.length,
             unpublished_asset_folders: assetFolders.length,
+            unpublished_translations: translations,
+            unpublished_locales: locales,
           }, null, 2),
         }],
       };

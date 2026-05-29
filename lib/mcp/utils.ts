@@ -119,6 +119,51 @@ export function getTiptapTextContent(text: string): TiptapDoc {
   };
 }
 
+/** True when value is a Tiptap document node: `{ type: 'doc', content: [...] }`. */
+export function isTiptapDoc(value: unknown): value is TiptapDoc {
+  return (
+    typeof value === 'object'
+    && value !== null
+    && (value as TiptapDoc).type === 'doc'
+    && Array.isArray((value as TiptapDoc).content)
+  );
+}
+
+/**
+ * Validate a translation's content_value against its content_type so malformed
+ * data is rejected before it reaches the database. Returns an actionable error
+ * the AI can use to correct and retry.
+ */
+export function validateTranslationContent(
+  contentType: 'text' | 'richtext' | 'asset_id',
+  contentValue: string,
+): { valid: true } | { valid: false; error: string } {
+  if (contentType === 'richtext') {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(contentValue);
+    } catch {
+      return {
+        valid: false,
+        error: 'richtext content_value must be a JSON-stringified Tiptap document like {"type":"doc","content":[...]}. Prefer the set_rich_text_translation tool, which builds the JSON from simple blocks.',
+      };
+    }
+    if (!isTiptapDoc(parsed)) {
+      return {
+        valid: false,
+        error: 'richtext content_value parsed as JSON but is not a Tiptap document. It must have the shape {"type":"doc","content":[...]}. Prefer the set_rich_text_translation tool.',
+      };
+    }
+    return { valid: true };
+  }
+
+  if (contentType === 'asset_id' && !contentValue.trim()) {
+    return { valid: false, error: 'asset_id content_value must be a non-empty asset ID.' };
+  }
+
+  return { valid: true };
+}
+
 /**
  * Build a Tiptap document from a simplified block array.
  * Accepts an array of block descriptors and produces valid Tiptap JSON.
