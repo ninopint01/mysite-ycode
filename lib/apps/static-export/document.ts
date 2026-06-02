@@ -573,9 +573,30 @@ export function collectInteractions(layers: Layer[]): ExportedInteraction[] {
   return collected
 }
 
+/** Scan a Tiptap JSON node for richTextComponent nodes and test their pre-resolved
+ * layers against the layer name (embedded rich-text components). */
+function tiptapTreeContains(node: any, name: string): boolean {
+  if (!node || typeof node !== 'object') return false
+  if (node.type === 'richTextComponent' && Array.isArray(node.attrs?._resolvedLayers)
+    && layerTreeContains(node.attrs._resolvedLayers as Layer[], name)) {
+    return true
+  }
+  if (Array.isArray(node.content)) {
+    for (const child of node.content) {
+      if (tiptapTreeContains(child, name)) return true
+    }
+  }
+  return false
+}
+
 export function layerTreeContains(layers: Layer[], name: string): boolean {
   for (const layer of layers) {
     if (layer.name === name) return true
+    const textVar = layer.variables?.text as any
+    if (textVar?.type === 'dynamic_rich_text' && textVar.data?.content
+      && tiptapTreeContains(textVar.data.content, name)) {
+      return true
+    }
     if (layer.children && layerTreeContains(layer.children, name)) return true
   }
   return false
