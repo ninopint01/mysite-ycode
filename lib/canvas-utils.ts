@@ -266,7 +266,7 @@ export function getCanvasIframeHtml(mountId: string = 'canvas-mount'): string {
     /* Dynamically populated: overrides vh/svh/dvh/lvh with fixed px values */
   </style>
 </head>
-<body class="h-full">
+<body class="min-h-full">
   <div id="${mountId}" class="contents"></div>
 </body>
 </html>`;
