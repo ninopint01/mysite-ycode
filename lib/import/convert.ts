@@ -45,7 +45,15 @@ function makeRichTextVariable(text: string) {
 }
 
 export class ImportConverter {
-  constructor(private readonly mat: ImportMaterializer) {}
+  /**
+   * @param mat        Materializer for deduped styles/assets/components.
+   * @param onProgress Called once per converted node (at every nesting level),
+   *                   so the caller can drive a "n of total" paste indicator.
+   */
+  constructor(
+    private readonly mat: ImportMaterializer,
+    private readonly onProgress?: () => void,
+  ) {}
 
   /** Convert a list of root nodes into Ycode layers. */
   async convertNodes(nodes: ImportNode[]): Promise<Layer[]> {
@@ -53,6 +61,7 @@ export class ImportConverter {
     for (const node of nodes) {
       const layer = await this.convertNode(node);
       if (layer) layers.push(layer);
+      this.onProgress?.();
     }
     return layers;
   }

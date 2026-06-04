@@ -23,32 +23,13 @@ import type { Layer } from '@/types';
 import { useFontsStore } from '@/stores/useFontsStore';
 import { YCODE_FIGMA_SIGNATURE, isYcodeFigmaPayload } from '@/lib/figma/types';
 import type { YcodeFigmaPayload } from '@/lib/figma/types';
+import { loadSiteStylesheetCss } from '@/lib/apps/webflow/stylesheet-cache';
 import { buildImport } from '@/lib/import';
 import { isWebflowClipboard, parseWebflowClipboard } from '@/lib/import/adapters/webflow';
-import { parseGlobalStylesheet, type GlobalStylesheet } from '@/lib/import/adapters/webflow/global-styles';
+import { parseGlobalStylesheet } from '@/lib/import/adapters/webflow/global-styles';
+import { plural } from '@/lib/import/summary';
 import type { ImportSummary } from '@/lib/import/types';
 import { YCODE_LAYER_CLIPBOARD_SIGNATURE } from '@/stores/useClipboardStore';
-
-// EXPERIMENT: hard-coded published Webflow stylesheet so we can validate global
-// style backfill (section background, text colours, heading colours, fonts)
-// before building the per-site URL detection/storage flow.
-const EXPERIMENT_WEBFLOW_CSS_URL =
-  'https://cdn.prod.website-files.com/6a1ed0b072b68f131b8cd038/css/liams-dapper-site-aac62a.webflow.shared.333816452.css';
-
-/** Best-effort fetch + parse of the site stylesheet via the server proxy. */
-async function loadGlobalStylesheet(url: string): Promise<GlobalStylesheet | undefined> {
-  try {
-    const res = await fetch(`/ycode/api/apps/webflow/stylesheet?url=${encodeURIComponent(url)}`);
-    if (!res.ok) return undefined;
-    const json = await res.json();
-    const css: string | undefined = json?.data?.css;
-    if (!css) return undefined;
-    return parseGlobalStylesheet(css);
-  } catch (error) {
-    console.warn('[useImportPaste] global stylesheet load failed:', error);
-    return undefined;
-  }
-}
 
 interface UseImportPasteOptions {
   enabled: boolean;
@@ -158,11 +139,11 @@ function readClipboardText(clipboardData: DataTransfer): string {
 
 function webflowSummaryMessage(summary: ImportSummary): string {
   const parts = [
-    `${summary.layers} layer${summary.layers === 1 ? '' : 's'}`,
-    summary.styles > 0 ? `${summary.styles} style${summary.styles === 1 ? '' : 's'}` : '',
-    summary.components > 0 ? `${summary.components} component${summary.components === 1 ? '' : 's'}` : '',
-    summary.assets > 0 ? `${summary.assets} image${summary.assets === 1 ? '' : 's'}` : '',
-    summary.fonts > 0 ? `${summary.fonts} font${summary.fonts === 1 ? '' : 's'}` : '',
+    plural(summary.layers, 'layer'),
+    summary.styles > 0 ? plural(summary.styles, 'style') : '',
+    summary.components > 0 ? plural(summary.components, 'component') : '',
+    summary.assets > 0 ? plural(summary.assets, 'image') : '',
+    summary.fonts > 0 ? plural(summary.fonts, 'font') : '',
   ].filter(Boolean);
   return `Imported ${parts.join(', ')}`;
 }
@@ -177,16 +158,30 @@ export function useImportPaste({
 
   const importWebflow = useCallback(async (text: string) => {
     isProcessingRef.current = true;
-    const toastId = toast.loading('Importing from Webflow…');
+    const toastId = toast.loading('Pasting from Webflow…');
     try {
-      const globalStyles = await loadGlobalStylesheet(EXPERIMENT_WEBFLOW_CSS_URL);
+      const css = await loadSiteStylesheetCss();
+      const globalStyles = css ? parseGlobalStylesheet(css) : undefined;
       const document = parseWebflowClipboard(text, globalStyles);
       if (!document) {
         toast.error('Could not read the Webflow selection', { id: toastId });
         return;
       }
 
-      const { layers, summary } = await buildImport(document);
+      // Stream "n of total layers" into the loading toast, throttled so large
+      // pastes don't re-render on every node.
+      let lastProgressAt = 0;
+      const onProgress = (done: number, total: number) => {
+        const now = performance.now();
+        if (done < total && now - lastProgressAt < 80) return;
+        lastProgressAt = now;
+        toast.loading('Pasting from Webflow…', {
+          id: toastId,
+          description: `Building layer ${done} of ${total}`,
+        });
+      };
+
+      const { layers, summary } = await buildImport(document, { onProgress });
 
       if (layers.length === 0) {
         toast.error('No layers found in the Webflow selection', { id: toastId });
@@ -198,7 +193,7 @@ export function useImportPaste({
       toast.success(webflowSummaryMessage(summary), {
         id: toastId,
         description: summary.collections > 0
-          ? `${summary.collections} collection${summary.collections === 1 ? '' : 's'} to re-link to your CMS.`
+          ? `${plural(summary.collections, 'collection')} to re-link to your CMS.`
           : undefined,
       });
     } catch (error) {
@@ -249,10 +244,10 @@ export function useImportPaste({
 
       const { summary } = materializer;
       const detailParts: string[] = [];
-      if (summary.components > 0) detailParts.push(`${summary.components} component${summary.components !== 1 ? 's' : ''}`);
-      if (summary.layerStyles > 0) detailParts.push(`${summary.layerStyles} style${summary.layerStyles !== 1 ? 's' : ''}`);
-      if (summary.colorVariables > 0) detailParts.push(`${summary.colorVariables} color variable${summary.colorVariables !== 1 ? 's' : ''}`);
-      if (fonts.installed.length > 0) detailParts.push(`${fonts.installed.length} font${fonts.installed.length !== 1 ? 's' : ''}`);
+      if (summary.components > 0) detailParts.push(plural(summary.components, 'component'));
+      if (summary.layerStyles > 0) detailParts.push(plural(summary.layerStyles, 'style'));
+      if (summary.colorVariables > 0) detailParts.push(plural(summary.colorVariables, 'color variable'));
+      if (fonts.installed.length > 0) detailParts.push(plural(fonts.installed.length, 'font'));
 
       toast.success('Imported from Figma', {
         id: toastId,
@@ -264,7 +259,7 @@ export function useImportPaste({
       if (fonts.unavailable.length > 0) {
         const names = fonts.unavailable.join(', ');
         toast.warning(
-          `Using default font for ${fonts.unavailable.length} unavailable font${fonts.unavailable.length !== 1 ? 's' : ''}`,
+          `Using default font for ${plural(fonts.unavailable.length, 'unavailable font')}`,
           {
             description: `Not on Google Fonts: ${names}. Upload them under Fonts to match the design.`,
           },

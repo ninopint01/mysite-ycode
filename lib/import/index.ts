@@ -43,12 +43,33 @@ export interface ImportResult {
   summary: ImportSummary;
 }
 
+/** Total nodes in the source tree — the denominator for paste progress. */
+function countNodes(nodes: { children?: unknown[] }[]): number {
+  let total = 0;
+  const walk = (list: { children?: unknown[] }[]) => {
+    for (const node of list) {
+      total += 1;
+      if (Array.isArray(node.children)) walk(node.children as { children?: unknown[] }[]);
+    }
+  };
+  walk(nodes);
+  return total;
+}
+
+export interface BuildImportOptions {
+  /** Reports converted-node progress (`done` of `total`) for a UI indicator. */
+  onProgress?: (done: number, total: number) => void;
+}
+
 /**
  * Run the shared pipeline and return the built layers + summary. The caller is
  * responsible for inserting `layers` onto the canvas (so Webflow and Figma both
  * flow through the host's one robust insertion path).
  */
-export async function buildImport(document: ImportDocument): Promise<ImportResult> {
+export async function buildImport(
+  document: ImportDocument,
+  options: BuildImportOptions = {},
+): Promise<ImportResult> {
   const mat = new ImportMaterializer(document.source);
 
   // Install referenced fonts up front (best-effort; needs the catalog loaded).
@@ -57,7 +78,12 @@ export async function buildImport(document: ImportDocument): Promise<ImportResul
     await Promise.all(document.fonts.map((f) => mat.installFont(f.family)));
   }
 
-  const converter = new ImportConverter(mat);
+  const total = countNodes(document.roots);
+  let done = 0;
+  const converter = new ImportConverter(mat, () => {
+    done += 1;
+    options.onProgress?.(done, total);
+  });
   let layers = await converter.convertNodes(document.roots);
   layers = await componentizeLayers(layers, mat);
 
