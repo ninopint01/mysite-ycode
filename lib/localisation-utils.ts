@@ -897,16 +897,15 @@ export function injectTranslatedText(
     // point at an ancestor div/section without `variables.text`) would
     // otherwise materialise text content on layers that should have none,
     // breaking layout with random strings.
-    // Skip the component-scope layer translation when:
-    // (a) this layer's text was set by an instance override — the override
-    //     value has already been translated at page scope via
-    //     `translateComponentOverrides`, and re-translating here would
-    //     clobber it with the component default; or
-    // (b) the layer has an active component-variable binding
-    //     (`variables.text.id`) — the renderer resolves the value via the
-    //     parent instance's overrides or the variable's default value, so
-    //     overwriting `variables.text` here would strip the binding id and
-    //     break that lookup chain.
+    // Skip the plain component-scope layer translation when this layer's text
+    // was set by an instance override — the override value has already been
+    // translated at page scope via `translateComponentOverrides`, and
+    // re-translating here would clobber it with the component default.
+    //
+    // Layers with an active component-variable binding (`variables.text.id`)
+    // are handled by the dedicated branch below, which preserves the binding
+    // id while injecting the translated content (replacing the whole variable
+    // would strip the id and break the binding lookup chain).
     const hasComponentVariableBinding = !!(layer.variables?.text as any)?.id;
     if (
       textValue
@@ -937,6 +936,33 @@ export function injectTranslatedText(
         // Plain-text value for a simple text source.
         (variableUpdates as any).text = createDynamicTextVariable(textValue);
       }
+    } else if (
+      textValue
+      && hasComponentVariableBinding
+      && !(layer as any)._textFromOverride
+    ) {
+      // Layer text is bound to a component variable (`variables.text.id`).
+      // Inject the translated content while preserving the binding `id` so the
+      // editor still sees the variable link and the renderer can use the
+      // localized value. Replacing the whole variable (as above) would strip
+      // the `id` and break the binding lookup chain.
+      const existingText = layer.variables!.text as any;
+      if (existingText.type === 'dynamic_rich_text') {
+        const translated = looksLikeTiptapJson(textValue)
+          ? createDynamicRichTextVariable(textValue)
+          : createDynamicRichTextVariableFromPlainText(textValue);
+        (variableUpdates as any).text = { ...translated, id: existingText.id };
+      } else {
+        (variableUpdates as any).text = {
+          ...existingText,
+          data: { ...existingText.data, content: textValue },
+        };
+      }
+      // Flag so the renderer prefers this injected (translated) content over the
+      // bound component variable's default when localizing on canvas. Without
+      // this, the binding-resolution branch would render the untranslated
+      // default value instead.
+      (updates as any)._textTranslated = true;
     }
 
     // 2. Inject asset translations for media layers

@@ -7,7 +7,7 @@ import LayerLockIndicator from '@/components/collaboration/LayerLockIndicator';
 import EditingIndicator from '@/components/collaboration/EditingIndicator';
 import { useCollaborationPresenceStore, getResourceLockKey, RESOURCE_TYPES } from '@/stores/useCollaborationPresenceStore';
 import { useAuthStore } from '@/stores/useAuthStore';
-import type { Layer, Locale, ComponentVariable, FormSettings, LinkSettings, Breakpoint, CollectionItemWithValues, Component } from '@/types';
+import type { Layer, Locale, ComponentVariable, FormSettings, LinkSettings, Breakpoint, CollectionItemWithValues, CollectionField, Component } from '@/types';
 import type { UseLiveLayerUpdatesReturn } from '@/hooks/use-live-layer-updates';
 import type { UseLiveComponentUpdatesReturn } from '@/hooks/use-live-component-updates';
 import { getLayerHtmlTag, getClassesString, getText, resolveFieldValue, isTextEditable, isTextContentLayer, isRichTextLayer, getCollectionVariable, evaluateVisibility, findAncestorByName, filterDisabledSliderLayers, getLayerCmsFieldBinding, findLayerById } from '@/lib/layer-utils';
@@ -567,8 +567,17 @@ const LayerItemImpl: React.FC<{
   // Clicks on the embedded component's internal layers should select the text layer
   const renderComponentBlock: RenderComponentBlockFn = useCallback(
     (comp, resolvedLayers, _overrides, key, innerAncestorIds) => {
+      // In edit mode, embedded rich-text component layers are resolved live and
+      // are not pre-translated (SSR pre-translates them in page-fetcher). Apply
+      // component-scope translations here so the canvas shows localized content.
+      const localizedLayers = (isEditMode && currentLocale && !currentLocale.is_default && translations)
+        ? injectTranslatedText(resolvedLayers, pageId || comp.id, translations, {
+          includeIncomplete: true,
+          defaultMasterComponentId: comp.id,
+        })
+        : resolvedLayers;
       const uniqueLayers = transformLayerIdsForInstance(
-        resolvedLayers,
+        localizedLayers,
         `${layer.id}-rtc-${key}`
       );
       return (
@@ -599,7 +608,7 @@ const LayerItemImpl: React.FC<{
       </React.Fragment>
       );
     },
-    [layer.id, sharedRendererProps, isEditMode]
+    [layer.id, sharedRendererProps, isEditMode, currentLocale, translations, pageId]
   );
 
   let htmlTag = getLayerHtmlTag(layer);
@@ -1057,6 +1066,22 @@ const LayerItemImpl: React.FC<{
       const variableDef = componentVariables.find(v => v.id === linkedVariableId);
       const overrideCategory = variableDef?.type === 'rich_text' ? 'rich_text' : 'text';
       const overrideValue = parentComponentOverrides?.[overrideCategory]?.[linkedVariableId];
+
+      // When localizing, a component-scope translation for this layer was
+      // injected into its own text variable (id preserved). Prefer it over the
+      // untranslated variable default — but an instance override still wins.
+      if (overrideValue === undefined && (layer as any)._textTranslated && textVariable) {
+        if (textVariable.type === 'dynamic_rich_text') {
+          const variable = isSimpleTextLayer
+            ? { ...textVariable, data: { ...textVariable.data, content: flattenTiptapParagraphs(textVariable.data.content) } }
+            : textVariable;
+          return renderRichText(variable as any, collectionLayerData, pageCollectionItemData || undefined, layer.textStyles, useSpanForParagraphs, isEditMode, linkContext, timezone, effectiveLayerDataMap, allComponents, renderComponentBlock, effectiveAncestorIds, isSimpleTextLayer);
+        }
+        if (textVariable.type === 'dynamic_text') {
+          return (textVariable as any).data.content;
+        }
+      }
+
       const valueToRender = overrideValue ?? variableDef?.default_value;
 
       if (valueToRender !== undefined) {
@@ -3154,9 +3179,17 @@ const LayerItemImpl: React.FC<{
             // what the server-side page fetcher does on /preview and published
             // routes via applyCmsTranslations.
             const baseItemValues = item.values || {};
-            const translatedItemValues = (currentLocale && !currentLocale.is_default && translations)
+            const shouldTranslateCms = !!(currentLocale && !currentLocale.is_default && translations);
+            const translatedItemValues = shouldTranslateCms
               ? applyCmsTranslations(item.id, baseItemValues, collectionFields, translations, isEditMode ? { includeIncomplete: true } : undefined)
               : baseItemValues;
+
+            // Translate referenced item values too so relationship paths render
+            // in the active locale on canvas (matches server-side page fetcher).
+            const translateRefValues = shouldTranslateCms
+              ? (refItemId: string, refValues: Record<string, string>, refFields: CollectionField[]) =>
+                applyCmsTranslations(refItemId, refValues, refFields, translations, isEditMode ? { includeIncomplete: true } : undefined)
+              : undefined;
 
             // Resolve reference fields to add relationship paths (e.g., "refFieldId.targetFieldId")
             const enhancedItemValues = collectionFields.length > 0
@@ -3164,7 +3197,9 @@ const LayerItemImpl: React.FC<{
                 translatedItemValues,
                 collectionFields,
                 itemsForReferenceResolution,
-                fieldsByCollectionId
+                fieldsByCollectionId,
+                new Set(),
+                translateRefValues
               )
               : translatedItemValues;
 

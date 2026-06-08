@@ -1177,7 +1177,10 @@ export function renderRichText(
   return doc.content.map((block: any, idx: number) => {
     const element = renderBlock(block, idx, collectionItemData, pageCollectionItemData, textStyles, useSpanForParagraphs, isEditMode, linkContext, timezone, layerDataMap, components, renderComponentBlock, ancestorComponentIds);
     const isVisibleBlock = block.type !== 'paragraph' || block.content?.length;
-    if (element && isVisibleBlock && isEditMode) {
+    // Embedded component blocks render as a React.Fragment, which only accepts
+    // `key`/`children` — cloning to inject `data-block-index` would throw.
+    const isFragment = React.isValidElement(element) && (element as React.ReactElement).type === React.Fragment;
+    if (element && isVisibleBlock && isEditMode && !isFragment) {
       return React.cloneElement(element as React.ReactElement<any>, {
         'data-block-index': visibleBlockIdx++,
       });

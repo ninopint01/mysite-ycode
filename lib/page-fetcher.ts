@@ -517,7 +517,10 @@ async function fetchPageByPathInternal(
               let enhancedItemValues = await resolveReferenceFields(
                 collectionItem.values,
                 collectionFields,
-                isPublished
+                isPublished,
+                '',
+                new Set(),
+                translations
               );
               enhancedItemValues = applyCmsTranslations(collectionItem.id, enhancedItemValues, collectionFields, translations, { includeIncomplete: !isPublished });
               enhancedItemValues = formatDateFieldsInItemValues(enhancedItemValues, collectionFields, timezone);
@@ -560,7 +563,10 @@ async function fetchPageByPathInternal(
             let enhancedItemValues = await resolveReferenceFields(
               collectionItem.values,
               collectionFields,
-              isPublished
+              isPublished,
+              '',
+              new Set(),
+              translations
             );
 
             // Apply CMS translations to the item values
@@ -954,6 +960,7 @@ async function fetchComponents(supabase: any, isPublished: boolean = false): Pro
  * @param itemValues - Current item values (field_id -> value)
  * @param fields - Collection fields to check for references
  * @param isPublished - Whether to fetch published data
+ * @param translations - CMS translations applied to resolved referenced values
  * @returns Enhanced item values with resolved reference data
  */
 async function resolveReferenceFields(
@@ -961,7 +968,8 @@ async function resolveReferenceFields(
   fields: CollectionField[],
   isPublished: boolean,
   pathPrefix: string = '',
-  visited: Set<string> = new Set()
+  visited: Set<string> = new Set(),
+  translations?: Record<string, Translation> | null
 ): Promise<Record<string, string>> {
   const enhancedValues = { ...itemValues };
 
@@ -985,6 +993,10 @@ async function resolveReferenceFields(
 
       const refFields = await getFieldsByCollectionId(field.reference_collection_id, isPublished, { excludeComputed: true });
 
+      // Translate the referenced item's values so localized pages render
+      // referenced CMS content in the active locale (not the source language)
+      const refValues = applyCmsTranslations(refItem.id, refItem.values, refFields, translations, { includeIncomplete: !isPublished });
+
       // Build the path prefix for this level
       const currentPath = pathPrefix ? `${pathPrefix}.${field.id}` : field.id;
 
@@ -992,7 +1004,7 @@ async function resolveReferenceFields(
       // e.g., if field is "Author" with id "abc123", and referenced item has "name" field with id "xyz789"
       // the value becomes accessible as "abc123.xyz789" in the values map
       for (const refField of refFields) {
-        const refValue = refItem.values[refField.id];
+        const refValue = refValues[refField.id];
         if (refValue !== undefined) {
           // Store as: parentFieldId.refFieldId for relationship path resolution
           enhancedValues[`${currentPath}.${refField.id}`] = refValue;
@@ -1001,11 +1013,12 @@ async function resolveReferenceFields(
 
       // Recursively resolve nested reference fields
       const nestedValues = await resolveReferenceFields(
-        refItem.values,
+        refValues,
         refFields,
         isPublished,
         currentPath,
-        visited
+        visited,
+        translations
       );
 
       // Merge nested values (they'll have the full path)
@@ -1034,6 +1047,7 @@ async function batchResolveReferenceFields(
   isPublished: boolean,
   dataCache?: CollectionDataCache,
   boundFieldPaths?: Set<string>,
+  translations?: Record<string, Translation> | null,
 ): Promise<Record<string, string>[]> {
   let referenceFields = fields.filter(
     f => f.type === 'reference' && f.reference_collection_id
@@ -1089,6 +1103,19 @@ async function batchResolveReferenceFields(
     refFieldsMap = new Map<string, CollectionField[]>(fieldEntries);
   }
 
+  // Translate each referenced item's values once (reused across all rows that
+  // reference it) so localized pages render referenced CMS content in the
+  // active locale instead of the source language.
+  const translatedRefValuesById = new Map<string, Record<string, string>>();
+  const getTranslatedRefValues = (refItem: CollectionItemWithValues, refFields: CollectionField[]): Record<string, string> => {
+    let cached = translatedRefValuesById.get(refItem.id);
+    if (!cached) {
+      cached = applyCmsTranslations(refItem.id, refItem.values, refFields, translations, { includeIncomplete: !isPublished });
+      translatedRefValuesById.set(refItem.id, cached);
+    }
+    return cached;
+  };
+
   return itemsValues.map(values => {
     const enhanced = { ...values };
 
@@ -1102,11 +1129,13 @@ async function batchResolveReferenceFields(
       const refFields = refFieldsMap.get(field.reference_collection_id);
       if (!refFields) continue;
 
+      const refValues = getTranslatedRefValues(refItem, refFields);
+
       for (const rf of refFields) {
         const dotKey = `${field.id}.${rf.id}`;
         if (boundFieldPaths && !boundFieldPaths.has(dotKey)) continue;
-        if (refItem.values[rf.id] !== undefined) {
-          enhanced[dotKey] = refItem.values[rf.id];
+        if (refValues[rf.id] !== undefined) {
+          enhanced[dotKey] = refValues[rf.id];
         }
       }
     }
@@ -1596,9 +1625,20 @@ async function resolveTiptapComponentCollections(
 
         // Recursively resolve rich text components inside the resolved layers
         // (handles Component A → rich text → Component B → collection)
-        const fullyResolved = await resolveRichTextCollections(
+        let fullyResolved = await resolveRichTextCollections(
           withCollections, components, isPublished, translations, childAncestors,
         );
+
+        // Translate the embedded component's layers. Component-scope
+        // translations are keyed `component:<comp.id>:layer:...`, so the
+        // resolved component id must be passed as the master component id —
+        // otherwise the lookup falls back to page scope and never matches.
+        if (translations) {
+          fullyResolved = injectTranslatedText(fullyResolved, '', translations, {
+            includeIncomplete: !isPublished,
+            defaultMasterComponentId: comp.id,
+          });
+        }
 
         node = {
           ...node,
@@ -2441,6 +2481,7 @@ export async function resolveCollectionLayers(
             isPublished,
             cache,
             layerBoundPaths,
+            translations,
           );
           const clonedLayers: Layer[] = await Promise.all(
             preprocessed.map(async ({ item, rawTranslatedValues }, index) => {
@@ -3317,6 +3358,9 @@ export async function renderCollectionItemsToHtml(
     preprocessed.map(p => p.formattedValues),
     collectionFields,
     isPublished,
+    undefined,
+    undefined,
+    translations,
   );
 
   // Render each item using the template

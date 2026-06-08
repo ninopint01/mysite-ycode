@@ -281,7 +281,8 @@ export function resolveReferenceFieldsSync(
   fields: import('@/types').CollectionField[],
   allItems: Record<string, import('@/types').CollectionItemWithValues[]>,
   allFields: Record<string, import('@/types').CollectionField[]>,
-  visited: Set<string> = new Set()
+  visited: Set<string> = new Set(),
+  translateValues?: (itemId: string, values: Record<string, string>, fields: import('@/types').CollectionField[]) => Record<string, string>
 ): Record<string, string> {
   const enhancedValues = { ...itemValues };
 
@@ -307,9 +308,15 @@ export function resolveReferenceFieldsSync(
     // Get fields for the referenced collection
     const refFields = allFields[field.reference_collection_id] || [];
 
+    // Translate the referenced item's values so the canvas renders referenced
+    // CMS content in the active locale (matches the server-side page fetcher)
+    const refValues = translateValues
+      ? translateValues(refItem.id, refItem.values, refFields)
+      : refItem.values;
+
     // Add referenced item's values with field.id as prefix
     for (const refField of refFields) {
-      const refValue = refItem.values[refField.id];
+      const refValue = refValues[refField.id];
       if (refValue !== undefined) {
         enhancedValues[`${field.id}.${refField.id}`] = refValue;
       }
@@ -317,11 +324,12 @@ export function resolveReferenceFieldsSync(
 
     // Recursively resolve nested reference fields
     const nestedValues = resolveReferenceFieldsSync(
-      refItem.values,
+      refValues,
       refFields,
       allItems,
       allFields,
-      visited
+      visited,
+      translateValues
     );
 
     // Merge nested values with proper path prefix

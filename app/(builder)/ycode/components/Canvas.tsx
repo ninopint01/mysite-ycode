@@ -30,7 +30,7 @@ import { useColorVariablesStore } from '@/stores/useColorVariablesStore';
 import { usePagesStore } from '@/stores/usePagesStore';
 import { useSettingsStore } from '@/stores/useSettingsStore';
 
-import { injectTranslatedText, translateComponentOverrides } from '@/lib/localisation-utils';
+import { applyCmsTranslations, injectTranslatedText, translateComponentOverrides } from '@/lib/localisation-utils';
 
 import type { Layer, Component, CollectionItemWithValues, CollectionField, Breakpoint, Asset, ComponentVariable, Locale, Translation } from '@/types';
 import type { UseLiveLayerUpdatesReturn } from '@/hooks/use-live-layer-updates';
@@ -381,13 +381,21 @@ const Canvas = React.memo(function Canvas({
   const enrichedPageCollectionItemDataRaw = useMemo(() => {
     const values = pageCollectionItem?.values;
     if (!values || !pageCollectionFields?.length) return values || null;
+    // Translate referenced item values so relationship paths render in the
+    // active locale on canvas (matches server-side page fetcher).
+    const translateRefValues = (currentLocale && !currentLocale.is_default && translations)
+      ? (refItemId: string, refValues: Record<string, string>, refFields: CollectionField[]) =>
+        applyCmsTranslations(refItemId, refValues, refFields, translations, { includeIncomplete: true })
+      : undefined;
     return resolveReferenceFieldsSync(
       values,
       pageCollectionFields,
       collectionItems,
-      collectionFields
+      collectionFields,
+      new Set(),
+      translateRefValues
     );
-  }, [pageCollectionItem?.values, pageCollectionFields, collectionItems, collectionFields]);
+  }, [pageCollectionItem?.values, pageCollectionFields, collectionItems, collectionFields, currentLocale, translations]);
 
   const enrichedPageCollectionItemDataRef = useRef(enrichedPageCollectionItemDataRaw);
   const enrichedPageCollectionItemDataKeyRef = useRef('');
