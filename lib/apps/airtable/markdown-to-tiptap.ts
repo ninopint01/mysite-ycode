@@ -30,10 +30,38 @@ interface TiptapNode {
 export function markdownToTiptapJson(markdown: string): string {
   if (!markdown) return JSON.stringify({ type: 'doc', content: [] });
 
-  const tokens = marked.lexer(markdown);
+  const tokens = marked.lexer(normalizeLooseEmphasis(markdown));
   const content = tokens.flatMap(tokenToNodes).filter(Boolean) as TiptapNode[];
 
   return JSON.stringify({ type: 'doc', content });
+}
+
+/**
+ * Airtable serializes rich-text fields as "loose" markdown where emphasis
+ * delimiters can sit directly against whitespace. For example, an italic
+ * phrase split across a line becomes `_In person & online. _` — note the space
+ * before the closing `_`. CommonMark (and therefore `marked`) requires the
+ * closing delimiter to be right-flanking (no preceding whitespace) and the
+ * opening delimiter to be left-flanking (no following whitespace), so these
+ * spans are left as LITERAL underscores/asterisks instead of becoming
+ * italic/bold — the source of the "underscores show on the published site" bug.
+ *
+ * This relocates whitespace sitting immediately inside a *balanced* emphasis
+ * span to the outside of the delimiters (`_text _` → `_text_ `, `_ text_` →
+ * ` _text_`), preserving the visible spacing while letting the parser recognize
+ * the emphasis. The `\1` backreference requires a matching closing run, so
+ * unpaired delimiters (e.g. "5 * 3" multiplication or a lone "_") are never
+ * touched, and the content is prevented from crossing a blank line so emphasis
+ * can't be mis-paired across paragraphs.
+ */
+function normalizeLooseEmphasis(markdown: string): string {
+  return markdown.replace(
+    /(\*{1,3}|_{1,3})([ \t]*)((?:(?!\n[ \t]*\n)[^])*?)([ \t]*)\1/g,
+    (match, delim: string, lead: string, content: string, trail: string) => {
+      if (content.trim() === '') return match; // delimiter-only run, leave as-is
+      return `${lead}${delim}${content}${delim}${trail}`;
+    },
+  );
 }
 
 // =============================================================================
