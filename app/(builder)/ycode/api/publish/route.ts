@@ -32,6 +32,11 @@ import type { Setting, PublishStats, PublishTableStats } from '@/types';
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
+// Publishing a large site (pages, collections, CSS regen, cache invalidation)
+// can exceed a platform's default serverless timeout. Raise to the max so big
+// sites don't time out mid-publish.
+export const maxDuration = 300;
+
 /** Group rows (fields, items, …) by their parent collection_id. */
 function groupByCollectionId<T extends { collection_id: string }>(rows: T[]): Map<string, T[]> {
   const map = new Map<string, T[]>();
