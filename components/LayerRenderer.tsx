@@ -1568,12 +1568,21 @@ const LayerItemImpl: React.FC<{
     const hasStaticFilters = !!collectionVariable.filters?.groups?.some(
       g => g.conditions.some(c => !c.inputLayerId)
     );
+    // Reference/inverse collections narrow the fetched pool client-side by the
+    // parent item's reference value, so the full candidate set must be loaded.
+    // The default page size can omit the specific referenced rows (e.g. a region
+    // sorted near the end of a large collection), hiding the nested layer.
+    const isReferenceFiltered = !!collectionVariable.source_field_id && (
+      collectionVariable.source_field_type === 'reference' ||
+      collectionVariable.source_field_type === 'multi_reference' ||
+      collectionVariable.source_field_type === 'inverse_reference'
+    );
     const pagination = collectionVariable.pagination;
     const isPaginated = !!pagination?.enabled && (pagination.mode === 'pages' || pagination.mode === 'load_more');
 
     let fetchLimit: number | undefined;
     let fetchOffset: number | undefined;
-    if (hasStaticFilters) {
+    if (hasStaticFilters || isReferenceFiltered) {
       fetchLimit = FILTERED_FETCH_LIMIT;
       fetchOffset = 0;
     } else if (isPaginated) {
@@ -1596,6 +1605,7 @@ const LayerItemImpl: React.FC<{
     isEditMode,
     collectionVariable?.id,
     collectionVariable?.source_field_type,
+    collectionVariable?.source_field_id,
     collectionVariable?.sort_by,
     collectionVariable?.sort_order,
     collectionVariable?.sort_by_inputLayerId,
