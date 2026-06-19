@@ -625,6 +625,45 @@ async function expandThroughComponents(
 }
 
 /**
+ * Find components that render any of the given collections — e.g. a
+ * collection-list/grid block bound to the collection placed inside a reusable
+ * component. The binding lives in the component's layers, not in the pages that
+ * use the component, so a plain page_layers scan for the collection ID misses
+ * those pages. Returns the embedding component IDs (transitively expanded
+ * through nested components) so callers can flag the pages using them.
+ */
+async function findComponentsEmbeddingCollections(
+  client: NonNullable<Awaited<ReturnType<typeof getSupabaseAdmin>>>,
+  collectionIds: string[],
+): Promise<string[]> {
+  if (collectionIds.length === 0) return [];
+
+  const { data: allComponents } = await client
+    .from('components')
+    .select('id, layers')
+    .eq('is_published', false)
+    .is('deleted_at', null);
+
+  if (!allComponents || allComponents.length === 0) return [];
+
+  const directIds: string[] = [];
+  for (const comp of allComponents) {
+    if (!comp.layers) continue;
+    const text = JSON.stringify(comp.layers);
+    for (const id of collectionIds) {
+      if (text.includes(id)) { directIds.push(comp.id as string); break; }
+    }
+  }
+
+  if (directIds.length === 0) return [];
+
+  // A collection-embedding component may itself be nested inside other
+  // components, so expand so pages using any ancestor are flagged too.
+  const transitive = await expandThroughComponents(client, directIds, []);
+  return [...new Set([...directIds, ...transitive])];
+}
+
+/**
  * Find pages affected by changed components, layer styles, and collections
  * in a single pass over draft page_layers (and pages.settings for collections).
  *
@@ -662,6 +701,16 @@ export async function findAffectedPages(
   const allComponentIds = [...new Set([...componentIds, ...expandedComponentIds])];
   const hasExpandedComponents = allComponentIds.length > 0;
 
+  // A collection can be rendered through a reusable component (the binding
+  // lives in the component, not the page using it). Find those components so
+  // pages embedding them are invalidated on CMS publish. Treated as collection
+  // matches — a page is collection-affected if its layers reference a changed
+  // collection ID directly OR a component that embeds one.
+  const collectionEmbeddingComponentIds = hasCollections
+    ? await findComponentsEmbeddingCollections(client, collectionIds)
+    : [];
+  const collectionMatchIds = new Set([...collectionIds, ...collectionEmbeddingComponentIds]);
+
   // Single scan of all draft page_layers
   const { data: allLayers } = await client
     .from('page_layers')
@@ -672,7 +721,6 @@ export async function findAffectedPages(
   if (allLayers) {
     const componentSet = new Set(allComponentIds);
     const styleSet = new Set(styleIds);
-    const collectionSet = new Set(collectionIds);
     const componentPages = new Set<string>();
     const stylePages = new Set<string>();
     const collectionPages = new Set<string>();
@@ -692,7 +740,7 @@ export async function findAffectedPages(
         }
       }
       if (hasCollections && !collectionPages.has(row.page_id)) {
-        for (const id of collectionSet) {
+        for (const id of collectionMatchIds) {
           if (text.includes(id)) { collectionPages.add(row.page_id); break; }
         }
       }
