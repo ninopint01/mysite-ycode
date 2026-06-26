@@ -10,7 +10,7 @@ import { useAuthStore } from '@/stores/useAuthStore';
 import type { Layer, Locale, ComponentVariable, FormSettings, LinkSettings, Breakpoint, CollectionItemWithValues, CollectionField, Component, DynamicTextVariable, DynamicRichTextVariable } from '@/types';
 import type { UseLiveLayerUpdatesReturn } from '@/hooks/use-live-layer-updates';
 import type { UseLiveComponentUpdatesReturn } from '@/hooks/use-live-component-updates';
-import { getLayerHtmlTag, getClassesString, getText, resolveFieldValue, isTextEditable, isTextContentLayer, isRichTextLayer, getCollectionVariable, evaluateVisibility, findAncestorByName, filterDisabledSliderLayers, getLayerCmsFieldBinding, findLayerById, applyCustomAttributes } from '@/lib/layer-utils';
+import { getLayerHtmlTag, getClassesString, getText, resolveFieldValue, isTextEditable, isTextContentLayer, isRichTextLayer, getCollectionVariable, evaluateVisibility, findAncestorByName, filterDisabledSliderLayers, getLayerCmsFieldBinding, findLayerById, applyCustomAttributes, containsLayerId } from '@/lib/layer-utils';
 import { getMapIframeProps, DEFAULT_MAP_SETTINGS, resolveMarkerColor } from '@/lib/map-utils';
 import { HTML_TO_REACT_ATTRS } from '@/lib/parse-head-html';
 import { SWIPER_CLASS_MAP, SWIPER_DATA_ATTR_MAP } from '@/lib/slider-constants';
@@ -480,6 +480,17 @@ const LayerItemImpl: React.FC<{
   const isEditing = editingLayerId === layer.id;
   const isDragging = activeLayerId === layer.id;
   const textEditable = isTextEditable(layer);
+
+  // Reveal an editor-hidden layer (e.g. an animated dropdown) when it OR a
+  // descendant is selected. Subscribed reactively so a hidden ancestor updates
+  // when a descendant is selected — its own `isSelected` wouldn't change then.
+  // Returns a stable `false` for non-hidden layers, so it never re-renders them.
+  const isEditorHidden = isEditMode && !!editorHiddenLayerIds?.has(layer.id);
+  const revealFromSelection = useEditorStore((state) => {
+    if (!isEditorHidden) return false;
+    const sel = state.selectedLayerId;
+    return sel ? containsLayerId(layer, sel) : false;
+  });
 
   const isEditor = useAuthStore((state) => state.role === 'editor');
 
@@ -2247,21 +2258,10 @@ const LayerItemImpl: React.FC<{
         (editorBreakpoint && hiddenBreakpoints.includes(editorBreakpoint));
 
       if (shouldHideOnBreakpoint) {
-        const shouldHide = parentComponentLayerId || (() => {
-          const storeSelectedId = useEditorStore.getState().selectedLayerId;
-          const isSelectedOrChildSelected = isSelected || (storeSelectedId && (() => {
-            const checkDescendants = (children: Layer[] | undefined): boolean => {
-              if (!children) return false;
-              for (const child of children) {
-                if (child.id === storeSelectedId) return true;
-                if (checkDescendants(child.children)) return true;
-              }
-              return false;
-            };
-            return checkDescendants(layer.children);
-          })());
-          return !isSelectedOrChildSelected;
-        })();
+        // Inside component instances internal layers can't be individually
+        // selected, so always hide. Otherwise reveal when this layer or a
+        // descendant is selected (subscribed reactively above).
+        const shouldHide = parentComponentLayerId ? true : !revealFromSelection;
 
         if (shouldHide) {
           const existingStyle = typeof elementProps.style === 'object' ? elementProps.style : {};

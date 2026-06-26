@@ -616,6 +616,12 @@ const CenterCanvas = React.memo(function CenterCanvas({
   // Track whether zoom calculation is ready (prevents flash of wrong zoom on initial load)
   const [isCanvasReady, setIsCanvasReady] = useState(false);
 
+  // Hide the component canvas while its auto-zoom settles. Opening a component
+  // runs several measurement passes (width/height) that each re-fit the zoom;
+  // revealing only after dimensions hold steady avoids a visible size jump.
+  const [isComponentCanvasSettling, setIsComponentCanvasSettling] = useState(false);
+  const componentSettleTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+
   // Optimize store subscriptions - use selective selectors (scoped to current page only)
   const currentDraft = usePagesStore((state) => currentPageId ? state.draftsByPageId[currentPageId] : null);
   const addLayerFromTemplate = usePagesStore((state) => state.addLayerFromTemplate);
@@ -720,6 +726,23 @@ const CenterCanvas = React.memo(function CenterCanvas({
   useEffect(() => {
     setReportedContentWidth(0);
   }, [editingComponentId]);
+
+  // On component open, hide the canvas so the initial multi-pass auto-zoom isn't
+  // visible. Only keyed on editingComponentId — NOT on dimensions — so reveals
+  // during normal editing don't re-hide and blink the canvas.
+  useEffect(() => {
+    setIsComponentCanvasSettling(!!editingComponentId);
+  }, [editingComponentId]);
+
+  // While settling (just opened), reveal once measured dimensions hold steady
+  // (debounced). Runs only while settling, so editing-time dimension changes
+  // don't trigger it. Fires even with no change via the settling dependency.
+  useEffect(() => {
+    if (!editingComponentId || !isComponentCanvasSettling) return;
+    clearTimeout(componentSettleTimerRef.current);
+    componentSettleTimerRef.current = setTimeout(() => setIsComponentCanvasSettling(false), 200);
+    return () => clearTimeout(componentSettleTimerRef.current);
+  }, [editingComponentId, isComponentCanvasSettling, reportedContentWidth, reportedContentHeight]);
 
   const collectionItemsFromStore = useCollectionsStore((state) => state.items);
   const collectionsFromStore = useCollectionsStore((state) => state.collections);
@@ -2574,7 +2597,8 @@ const CenterCanvas = React.memo(function CenterCanvas({
             elementPicker?.active && 'cursor-crosshair'
           )}
           style={{
-            opacity: isCanvasReady ? 1 : 0,
+            opacity: isCanvasReady && !isComponentCanvasSettling ? 1 : 0,
+            transition: 'opacity 120ms ease-out',
             scrollbarWidth: 'none', // Firefox
             msOverflowStyle: 'none', // IE/Edge
             WebkitOverflowScrolling: 'touch',

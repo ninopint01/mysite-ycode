@@ -543,9 +543,42 @@ export interface EditorHiddenLayerInfo {
 }
 
 /**
+ * Whether a tween's on-load `from` state leaves the element hidden, so the
+ * editor should hide it by default and reveal it on selection. Covers explicit
+ * `display: hidden` (any trigger) plus toggle triggers (hover/click) whose
+ * resting state hides via opacity, scale-to-zero, or a translate that moves the
+ * element away (e.g. a slide-out dropdown clipped by an `overflow-hidden`
+ * wrapper). Intro triggers (load/scroll-into-view) reveal permanent content, so
+ * their transform/opacity `from` states must NOT hide it in the editor.
+ */
+function tweenHidesOnLoad(interaction: LayerInteraction, tween: InteractionTween): boolean {
+  const { trigger } = interaction;
+  const from = tween.from;
+  if (!from) return false;
+  const apply = tween.apply_styles;
+
+  if (from.display === 'hidden' && getEffectiveApplyStyle(trigger, 'display', apply) === 'on-load') {
+    return true;
+  }
+
+  if (trigger !== 'hover' && trigger !== 'click') return false;
+
+  const isOnLoad = (key: TweenPropertyKey) => getEffectiveApplyStyle(trigger, key, apply) === 'on-load';
+  const num = (v: unknown) => (v === null || v === undefined ? NaN : parseFloat(String(v)));
+
+  if (from.autoAlpha != null && isOnLoad('autoAlpha') && num(from.autoAlpha) === 0) return true;
+  if (from.scale != null && isOnLoad('scale') && num(from.scale) === 0) return true;
+  if (from.x != null && isOnLoad('x') && num(from.x) !== 0) return true;
+  if (from.y != null && isOnLoad('y') && num(from.y) !== 0) return true;
+
+  return false;
+}
+
+/**
  * Collect layer IDs that should be visually hidden on canvas in edit mode
- * These are layers with display: hidden animation and apply_styles: on-load
- * Returns a Map of layerId -> breakpoints (empty = all breakpoints)
+ * (display: hidden, or a toggle's on-load hidden resting state) so they're
+ * revealed only when selected. Returns a Map of layerId -> breakpoints
+ * (empty = all breakpoints).
  */
 export function collectEditorHiddenLayerIds(layers: Layer[]): Map<string, Breakpoint[]> {
   const hiddenLayerMap = new Map<string, Breakpoint[]>();
@@ -555,12 +588,7 @@ export function collectEditorHiddenLayerIds(layers: Layer[]): Map<string, Breakp
       if (layer.interactions) {
         layer.interactions.forEach((interaction) => {
           (interaction.tweens || []).forEach((tween) => {
-            // Check if display: hidden with effective on-load apply style
-            // (explicit on-load OR intro trigger like load/scroll-into-view)
-            if (
-              tween.from?.display === 'hidden' &&
-              getEffectiveApplyStyle(interaction.trigger, 'display', tween.apply_styles) === 'on-load'
-            ) {
+            if (tweenHidesOnLoad(interaction, tween)) {
               const breakpoints = interaction.timeline?.breakpoints || [];
               const existing = hiddenLayerMap.get(tween.layer_id);
 

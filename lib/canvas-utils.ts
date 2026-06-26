@@ -223,6 +223,20 @@ export function measureContentExtent(doc: Document): number {
 }
 
 /**
+ * True when a layer must be excluded from component content-extent measurement.
+ * `position: fixed` overlays/backdrops are pinned to the viewport, so a
+ * full-height backdrop (`fixed h-full`) measures as tall as the iframe — feeding
+ * back into the iframe height and ballooning the canvas. They never define the
+ * content extent, so they're skipped. Layers hidden on load (display:none)
+ * already measure as a zero-size rect and are filtered separately, so once a
+ * hidden-by-animation layer is revealed it is measured again and the canvas
+ * height recalculates to fit it.
+ */
+export function isNonContentLayer(node: HTMLElement, win: Window): boolean {
+  return win.getComputedStyle(node).position === 'fixed';
+}
+
+/**
  * Shared HTML template for canvas-style iframes with Tailwind Browser CDN.
  * Used by both the editor Canvas and the thumbnail capture hook.
  * @param mountId - The ID of the mount point div (default: 'canvas-mount')
