@@ -296,6 +296,13 @@ export async function generatePageMetadata(
   // absolute URLs as strings here instead of relying on metadataBase.
   let siteBaseUrl: string | null = null;
 
+  // URL of the current page, shared by canonical and og:url. Prefer an absolute
+  // URL built from the resolved base (canonical / primary domain / Vercel env)
+  // so it's correct on Vercel and cloud even when the route doesn't set
+  // `metadataBase`. Falls back to the relative path locally (no base
+  // configured), which Next.js resolves against `metadataBase` when available.
+  let pageUrl: string | undefined;
+
   // Always fetch global settings — preview mode reads draft assets so the
   // favicon and web clip render before the user publishes.
   const seoSettings = options.globalSeoSettings || await fetchGlobalPageSettings(isPreview);
@@ -306,6 +313,12 @@ export async function generatePageMetadata(
       primaryDomainUrl,
     });
 
+    pageUrl = pagePath === undefined
+      ? undefined
+      : siteBaseUrl
+        ? buildAbsolutePageUrl(siteBaseUrl, pagePath)
+        : pagePath;
+
     // Add Google Site Verification meta tag
     if (seoSettings.googleSiteVerification) {
       metadata.verification = {
@@ -314,10 +327,10 @@ export async function generatePageMetadata(
     }
 
     // Add canonical URL
-    if (seoSettings.globalCanonicalUrl && pagePath !== undefined) {
+    if (pageUrl !== undefined) {
       metadata.alternates = {
         ...metadata.alternates,
-        canonical: buildAbsolutePageUrl(seoSettings.globalCanonicalUrl, pagePath),
+        canonical: pageUrl,
       };
     }
 
@@ -355,17 +368,6 @@ export async function generatePageMetadata(
         : seoSettings.webClipUrl;
     }
   }
-
-  // URL of the current page for og:url. Prefer an absolute URL built from the
-  // resolved base (canonical / primary domain / Vercel env) so it's correct on
-  // Vercel and cloud even when the route doesn't set `metadataBase`. Falls back
-  // to the relative path locally (no base configured), which Next.js resolves
-  // against `metadataBase` when available.
-  const pageUrl = pagePath === undefined
-    ? undefined
-    : siteBaseUrl
-      ? buildAbsolutePageUrl(siteBaseUrl, pagePath)
-      : pagePath;
 
   // Add Open Graph and Twitter Card metadata (not for error pages)
   if (!isErrorPage) {
